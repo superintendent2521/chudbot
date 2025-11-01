@@ -48,10 +48,10 @@ async def on_voice_leave(event: VoiceUserLeave):
         f"❌ **{event.author.username}** left **{event.channel.name}**"
     )
 
-@slash_command(name="mcstatus", description="Check the status of hyperborea.mcserver.us")
+@slash_command(name="mcstatus", description="Check the status of agartha.mc.gg")
 async def mcstatus_command(ctx: SlashContext):
     await ctx.defer()
-    server_address = "hyperborea.mcserver.us"
+    server_address = "agartha.mc.gg"
     api_url = f"https://api.mcsrvstat.us/3/{server_address}"
     
     try:
@@ -75,6 +75,7 @@ async def mcstatus_command(ctx: SlashContext):
                         
                         await ctx.send(
                             f"✅ **{server_address} is ONLINE**\n"
+                            f"**MOTD:** {motd}\n"
                             f"**Players:** {players}"
                             f"{player_list}\n"
                         )
