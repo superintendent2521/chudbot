@@ -2,11 +2,8 @@ import interactions
 import os
 import aiohttp
 import asyncio
-import functools
 import logging
-from collections import deque
-from dataclasses import dataclass
-from typing import Callable, Deque, Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 from dotenv import load_dotenv
 from interactions import (
     Client,
@@ -17,33 +14,18 @@ from interactions import (
     slash_command,
     slash_option,
 )
+from interactions.api.events import RawGatewayEvent, WebsocketReady
 from interactions.api.events.discord import MessageCreate, VoiceUserJoin, VoiceUserLeave
-from interactions.api.voice.audio import AudioVolume
-
-try:
-    import yt_dlp  # type: ignore
-except ImportError:  # pragma: no cover - handled at runtime
-    yt_dlp = None
+import lavalink
 
 # Load environment variables
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("chuds.bot")
 
-YTDL_OPTIONS = {
-    "quiet": True,
-    "format": "bestaudio/best",
-    "outtmpl": "%(id)s",
-    "restrictfilenames": True,
-    "ignoreerrors": False,
-    "no_warnings": True,
-    "default_search": "auto",
-    "source_address": "0.0.0.0",
-    "nocheckcertificate": True,
-}
-FFMPEG_RECONNECT_ARGS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 MUSIC_IDLE_TIMEOUT = 90
 VOICE_CONNECT_TIMEOUT = 15
+DEFAULT_PLAYER_VOLUME = 50
 
 # Environment switch (change to 'dev' for development)
 ENVIRONMENT = 'main'  # or 'dev'
@@ -82,53 +64,39 @@ if MUSIC_DJ_ROLE_ID_RAW:
         MUSIC_DJ_ROLE_ID = int(music_role_digits)
     else:
         logger.warning("MUSIC_DJ_ROLE_ID is set but does not contain digits. Ignoring value.")
+LAVALINK_HOST = os.getenv("LAVALINK_HOST", "").strip()
+LAVALINK_PORT_RAW = os.getenv("LAVALINK_PORT", "").strip()
+LAVALINK_PASSWORD = os.getenv("LAVALINK_PASSWORD", "").strip()
+LAVALINK_REGION = os.getenv("LAVALINK_REGION", "global").strip() or "global"
+LAVALINK_SSL = os.getenv("LAVALINK_SSL", "false").strip().lower() in {"1", "true", "yes"}
+try:
+    LAVALINK_PORT = int(LAVALINK_PORT_RAW) if LAVALINK_PORT_RAW else None
+except ValueError:
+    LAVALINK_PORT = None
+    logger.warning("LAVALINK_PORT must be numeric, got %s", LAVALINK_PORT_RAW)
+MUSIC_AVAILABLE = all([LAVALINK_HOST, LAVALINK_PORT, LAVALINK_PASSWORD])
 
 if not OPENROUTER_API_KEY:
     logger.warning("OPENROUTER_API_KEY not set. AI chat feature disabled.")
-if yt_dlp is None:
-    logger.warning("yt-dlp is not installed. Music commands are disabled until the dependency is available.")
+if not MUSIC_AVAILABLE:
+    logger.warning("Lavalink connection info missing. Music commands are disabled.")
 
 user_memories: Dict[int, List[dict]] = {}
+lavalink_client: Optional[lavalink.Client] = None
 
 
 class MusicError(Exception):
     """Raised when the music subsystem encounters an issue."""
 
 
-@dataclass
-class MusicTrack:
-    title: str
-    stream_url: str
-    webpage_url: str
-    duration: Optional[int]
-    uploader: Optional[str]
-    requested_by: str
-
-    @property
-    def pretty_duration(self) -> str:
-        if not self.duration:
-            return "LIVE"
-        minutes, seconds = divmod(self.duration, 60)
-        hours, minutes = divmod(minutes, 60)
-        if hours:
-            return f"{hours}:{minutes:02d}:{seconds:02d}"
-        return f"{minutes}:{seconds:02d}"
-
-
 class GuildMusicSession:
     def __init__(self, guild_id: int, cleanup_callback: Callable[[int], None]) -> None:
         self.guild_id = guild_id
-        self.queue: Deque[MusicTrack] = deque()
-        self.current: Optional[MusicTrack] = None
         self.voice_state = None
-        self._condition = asyncio.Condition()
-        self.player_task: Optional[asyncio.Task] = None
         self.idle_task: Optional[asyncio.Task] = None
-        self._closing = False
         self._cleanup_callback = cleanup_callback
 
     async def ensure_connected(self, channel) -> None:
-        """Connect or move to the target voice channel."""
         if self.voice_state and getattr(self.voice_state, "channel", None):
             current_channel = self.voice_state.channel
             if current_channel and current_channel.id == channel.id:
@@ -137,106 +105,29 @@ class GuildMusicSession:
             return
         self.voice_state = await channel.connect()
 
-    async def enqueue(self, track: MusicTrack) -> None:
-        """Add a track to the queue and spin up the playback loop."""
-        self._closing = False
-        self._cancel_idle_timer()
-        async with self._condition:
-            self.queue.append(track)
-            self._condition.notify()
-        if not self.player_task or self.player_task.done():
-            self.player_task = asyncio.create_task(self._player_loop())
-
-    async def skip(self) -> None:
-        if not self.voice_state or not self.voice_state.playing:
-            raise MusicError("Nothing is currently playing.")
-        await self.voice_state.stop()
-
-    def pause(self) -> None:
-        if not self.voice_state or not self.voice_state.playing:
-            raise MusicError("Nothing is currently playing.")
-        if self.voice_state.paused:
-            raise MusicError("Playback is already paused.")
-        self.voice_state.pause()
-
-    def resume(self) -> None:
-        if not self.voice_state or not self.voice_state.paused:
-            raise MusicError("Playback is not paused.")
-        self.voice_state.resume()
-
-    async def stop(self, *, disconnect: bool = False) -> None:
-        """Clear queue and optionally disconnect from the channel."""
-        self._closing = True
-        async with self._condition:
-            self.queue.clear()
-            self._condition.notify_all()
-        self._cancel_idle_timer()
-
-        if self.voice_state and (self.voice_state.playing or self.voice_state.paused):
-            await self.voice_state.stop()
-
-        task = self.player_task
-        if task:
-            try:
-                await task
-            except Exception as error:  # pragma: no cover
-                logger.warning("Music player task ended with error: %s", error)
-        self.player_task = None
-        self.current = None
-
-        if disconnect:
-            if self.voice_state:
-                try:
-                    await self.voice_state.disconnect()
-                finally:
-                    self.voice_state = None
-            self._cleanup_callback(self.guild_id)
-
-        self._closing = False
-
     async def disconnect(self) -> None:
-        await self.stop(disconnect=True)
-
-    async def _player_loop(self) -> None:
-        """Continuously pull tracks from the queue and stream them."""
-        while True:
-            track = await self._next_track()
-            if track is None:
-                break
-            if not self.voice_state:
-                logger.warning("Voice state missing for guild %s, aborting playback.", self.guild_id)
-                break
-
-            self.current = track
-            audio = AudioVolume(track.stream_url)
-            audio.ffmpeg_before_args = FFMPEG_RECONNECT_ARGS
+        self.cancel_idle_timer()
+        if self.voice_state:
             try:
-                await self.voice_state.play(audio)
-            except Exception as error:
-                logger.error("Failed to play %s: %s", track.title, error)
+                await self.voice_state.disconnect()
             finally:
-                audio.cleanup()
-                self.current = None
+                self.voice_state = None
+        if lavalink_client:
+            player = lavalink_client.player_manager.get(self.guild_id)
+            if player:
+                try:
+                    await player.stop()
+                except Exception:
+                    pass
+                lavalink_client.player_manager.remove(self.guild_id)
+        self._cleanup_callback(self.guild_id)
 
-            if not self.queue:
-                self._start_idle_timer()
-
-        self.player_task = None
-
-    async def _next_track(self) -> Optional[MusicTrack]:
-        async with self._condition:
-            while not self.queue and not self._closing:
-                await self._condition.wait()
-            if self._closing:
-                return None
-            return self.queue.popleft()
-
-    def _start_idle_timer(self) -> None:
+    def start_idle_timer(self) -> None:
         if self.idle_task and not self.idle_task.done():
             return
         self.idle_task = asyncio.create_task(self._disconnect_when_idle())
 
-    def _cancel_idle_timer(self) -> None:
+    def cancel_idle_timer(self) -> None:
         if self.idle_task and not self.idle_task.done():
             self.idle_task.cancel()
         self.idle_task = None
@@ -245,8 +136,6 @@ class GuildMusicSession:
         try:
             await asyncio.sleep(MUSIC_IDLE_TIMEOUT)
         except asyncio.CancelledError:  # pragma: no cover
-            return
-        if self.queue or self.current:
             return
         await self.disconnect()
 
@@ -268,47 +157,73 @@ class MusicManager:
     def active_session(self, guild_id: int) -> Optional[GuildMusicSession]:
         return self.sessions.get(guild_id)
 
-    async def build_track(self, query: str, requested_by: str) -> MusicTrack:
-        if yt_dlp is None:
-            raise MusicError("yt-dlp is not installed on this system.")
+    def require_client(self) -> lavalink.Client:
+        if not MUSIC_AVAILABLE or not lavalink_client:
+            raise MusicError("Lavalink client is not ready.")
+        return lavalink_client
 
+    def get_player(self, guild_id: int):
+        client = self.require_client()
+        return client.player_manager.create(guild_id)
+
+    async def load_tracks(self, query: str) -> lavalink.LoadResult:
+        client = self.require_client()
         normalized = query.strip()
-        search_target = normalized
+        if not normalized:
+            raise MusicError("Please provide a search term or link.")
         if not normalized.startswith(("http://", "https://")):
-            search_target = f"ytsearch1:{normalized}"
+            normalized = f"ytsearch:{normalized}"
+        result = await client.get_tracks(normalized)
+        if result.load_type == lavalink.LoadType.ERROR:
+            raise MusicError(f"Lavalink error: {result.error}")
+        if result.load_type == lavalink.LoadType.EMPTY or not result.tracks:
+            raise MusicError("No matches found for that query.")
+        return result
 
-        def _extract() -> dict:
-            with yt_dlp.YoutubeDL(YTDL_OPTIONS) as downloader:
-                return downloader.extract_info(search_target, download=False)
+    async def schedule_idle(self, guild_id: int) -> None:
+        session = self.sessions.get(guild_id)
+        if session:
+            session.start_idle_timer()
 
-        try:
-            info = await asyncio.to_thread(_extract)
-        except Exception as error:
-            raise MusicError(f"Failed to process query: {error}") from error
-
-        if not info:
-            raise MusicError("No results returned for that query.")
-        if "entries" in info:
-            entries = info.get("entries") or []
-            if not entries:
-                raise MusicError("No playable results found.")
-            info = entries[0]
-
-        stream_url = info.get("url")
-        if not stream_url:
-            raise MusicError("Unable to find a playable audio stream.")
-
-        return MusicTrack(
-            title=info.get("title", "Untitled"),
-            stream_url=stream_url,
-            webpage_url=info.get("webpage_url", search_target),
-            duration=info.get("duration"),
-            uploader=info.get("uploader"),
-            requested_by=requested_by,
-        )
+    def cancel_idle(self, guild_id: int) -> None:
+        session = self.sessions.get(guild_id)
+        if session:
+            session.cancel_idle_timer()
 
 
 music_manager = MusicManager()
+
+
+class LavalinkEvents:
+    def __init__(self, manager: MusicManager) -> None:
+        self.manager = manager
+
+    @lavalink.listener(lavalink.TrackStartEvent)
+    async def track_start(self, event: lavalink.TrackStartEvent) -> None:
+        logger.info(
+            "TrackStartEvent in guild %s: %s",
+            event.player.guild_id,
+            getattr(event.track, "title", "Unknown title"),
+        )
+        self.manager.cancel_idle(event.player.guild_id)
+    @lavalink.listener(lavalink.TrackEndEvent)
+    async def track_end(self, event: lavalink.TrackEndEvent) -> None:
+        if event.reason and event.reason.may_start_next():
+            await event.player.play()
+        elif not event.player.queue:
+            await self.manager.schedule_idle(event.player.guild_id)
+
+    @lavalink.listener(lavalink.QueueEndEvent)
+    async def queue_end(self, event: lavalink.QueueEndEvent) -> None:
+        await self.manager.schedule_idle(event.player.guild_id)
+
+    @lavalink.listener(lavalink.TrackExceptionEvent)
+    async def track_exception(self, event: lavalink.TrackExceptionEvent) -> None:
+        logger.warning("Track exception in guild %s: %s", event.player.guild_id, event.exception)
+        if event.player.queue:
+            await event.player.play()
+        else:
+            await self.manager.schedule_idle(event.player.guild_id)
 
 
 def _has_music_control(member) -> bool:
@@ -334,10 +249,105 @@ async def _require_music_permission(ctx: SlashContext) -> bool:
         return True
     await ctx.send("You can't use music commands while holding the blocked DJ role.", ephemeral=True)
     return False
+
+
+
+def _lavalink_ready() -> bool:
+    return MUSIC_AVAILABLE and lavalink_client is not None
+
+
+async def _require_lavalink(ctx: SlashContext) -> bool:
+    if _lavalink_ready():
+        return True
+    await ctx.send(
+        "Music playback isn't configured. Set the Lavalink environment variables and restart the bot.",
+        ephemeral=True,
+    )
+    return False
+
+
+def _format_duration(duration_ms: Optional[int]) -> str:
+    if duration_ms is None or duration_ms <= 0:
+        return "LIVE"
+    seconds = duration_ms // 1000
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
 bot = Client(
     token=BOT_TOKEN,
     intents=Intents.DEFAULT | Intents.GUILD_VOICE_STATES,
 )
+
+
+async def _forward_voice_event(event_name: str, data: dict) -> None:
+    """Pass VOICE_* gateway payloads to Lavalink."""
+    if not _lavalink_ready() or not isinstance(data, dict):
+        return
+
+    payload = {"t": event_name, "d": data}
+
+    if event_name == "VOICE_STATE_UPDATE":
+        logger.info(
+            "Forwarding %s for guild %s (channel=%s, session=%s)",
+            event_name,
+            data.get("guild_id"),
+            data.get("channel_id"),
+            data.get("session_id"),
+        )
+    else:
+        logger.info(
+            "Forwarding %s for guild %s (endpoint=%s)",
+            event_name,
+            data.get("guild_id"),
+            data.get("endpoint"),
+        )
+
+    try:
+        await lavalink_client.voice_update_handler(payload)  # type: ignore[arg-type]
+    except Exception as error:
+        logger.error("Error forwarding %s to Lavalink: %s", event_name, error)
+
+
+@listen("raw_voice_state_update")
+async def on_raw_voice_state_update(event: RawGatewayEvent):
+    """Forward VOICE_STATE_UPDATE payloads coming from the gateway."""
+    if not _lavalink_ready():
+        return
+
+    data = event.data if isinstance(event.data, dict) else None
+    if not data:
+        logger.debug("Ignored VOICE_STATE_UPDATE because payload was %r", event.data)
+        return
+
+    target_user = str(getattr(lavalink_client, "_user_id", "")) if lavalink_client else ""
+    if target_user and str(data.get("user_id")) != target_user:
+        logger.debug(
+            "Skipping VOICE_STATE_UPDATE for guild %s (user %s != bot %s)",
+            data.get("guild_id"),
+            data.get("user_id"),
+            target_user,
+        )
+        return
+
+    await _forward_voice_event("VOICE_STATE_UPDATE", data)
+
+
+@listen("raw_voice_server_update")
+async def on_raw_voice_server_update(event: RawGatewayEvent):
+    """Forward VOICE_SERVER_UPDATE payloads coming from the gateway."""
+    if not _lavalink_ready():
+        return
+
+    data = event.data if isinstance(event.data, dict) else None
+    if not data:
+        logger.debug("Ignored VOICE_SERVER_UPDATE because payload was %r", event.data)
+        return
+
+    await _forward_voice_event("VOICE_SERVER_UPDATE", data)
+
+
 logger.info("Environment: %s", ENVIRONMENT)
 # Version
 @slash_command(name="version", description="My first command :)")
@@ -387,6 +397,27 @@ async def on_voice_leave(event: VoiceUserLeave):
     await channel.send(
         f"❌ **{event.author.username}** left **{event.channel.name}**"
     )
+
+@listen(WebsocketReady)
+async def on_gateway_ready(event: WebsocketReady):
+    global lavalink_client
+    if not MUSIC_AVAILABLE or lavalink_client:
+        return
+    try:
+        lavalink_client = lavalink.Client(event.client.user.id)
+        lavalink_client.add_node(
+            host=LAVALINK_HOST,
+            port=LAVALINK_PORT,
+            password=LAVALINK_PASSWORD,
+            region=LAVALINK_REGION,
+            ssl=LAVALINK_SSL,
+        )
+        lavalink_client.add_event_hooks(LavalinkEvents(music_manager))
+        logger.info("Connected to Lavalink node at %s:%s", LAVALINK_HOST, LAVALINK_PORT)
+    except Exception as error:
+        lavalink_client = None
+        logger.error("Failed to connect to Lavalink: %s", error)
+
 
 @slash_command(name="mcstatus", description="Check the status of agartha.mc.gg")
 async def mcstatus_command(ctx: SlashContext):
@@ -439,11 +470,7 @@ async def mcstatus_command(ctx: SlashContext):
 async def play_command(ctx: SlashContext, query: str):
     if not await _require_music_permission(ctx):
         return
-    if yt_dlp is None:
-        await ctx.send(
-            "Music playback isn't available because yt-dlp is not installed on the host.",
-            ephemeral=True,
-        )
+    if not await _require_lavalink(ctx):
         return
     if not ctx.guild_id:
         await ctx.send("This command can only be used inside a server.", ephemeral=True)
@@ -457,45 +484,70 @@ async def play_command(ctx: SlashContext, query: str):
     await ctx.defer()
     guild_id = int(ctx.guild_id)
     session = music_manager.get_session(guild_id)
+    player = music_manager.get_player(guild_id)
+    if DEFAULT_PLAYER_VOLUME != player.volume:
+        try:
+            await player.set_volume(DEFAULT_PLAYER_VOLUME)
+        except Exception as error:
+            logger.warning("Unable to set player volume to %s: %s", DEFAULT_PLAYER_VOLUME, error)
     try:
         await asyncio.wait_for(session.ensure_connected(voice_channel), timeout=VOICE_CONNECT_TIMEOUT)
     except asyncio.TimeoutError:
+        if lavalink_client:
+            lavalink_client.player_manager.remove(guild_id)
         await ctx.send("I couldn't join that voice chat in time. Please try again.", ephemeral=True)
         return
     except Exception as error:
         logger.error("Failed to connect to voice channel %s: %s", voice_channel.id, error)
+        if lavalink_client:
+            lavalink_client.player_manager.remove(guild_id)
         await ctx.send("I couldn't join that voice chat. Check my permissions and try again.", ephemeral=True)
         return
 
-    display_name = getattr(ctx.author, "display_name", ctx.author.username)
     try:
-        track = await music_manager.build_track(query, display_name)
+        result = await music_manager.load_tracks(query)
     except MusicError as error:
         await ctx.send(f"I couldn't load that track: {error}", ephemeral=True)
         return
 
-    await session.enqueue(track)
-    await ctx.send(
-        f"Queued **{track.title}** (`{track.pretty_duration}`) for {ctx.author.mention}\n<{track.webpage_url}>"
-    )
+    player.channel_id = voice_channel.id
+
+    if result.load_type == lavalink.LoadType.PLAYLIST:
+        for track in result.tracks:
+            track.requester = ctx.author.id  # type: ignore[attr-defined]
+            player.add(track)
+        playlist_name = result.playlist_info.name if result.playlist_info else "Playlist"
+        await ctx.send(
+            f"Queued playlist **{playlist_name}** with {len(result.tracks)} tracks for {ctx.author.mention}"
+        )
+    else:
+        track = result.tracks[0]
+        track.requester = ctx.author.id  # type: ignore[attr-defined]
+        player.add(track)
+        await ctx.send(
+            f"Queued **{track.title}** (`{_format_duration(track.duration)}`) for {ctx.author.mention}\n"
+            f"<{track.uri}>"
+        )
+
+    session.cancel_idle_timer()
+    if not player.is_playing:
+        await player.play()
 
 
 @slash_command(name="skip", description="Skip the currently playing track")
 async def skip_command(ctx: SlashContext):
     if not await _require_music_permission(ctx):
         return
+    if not await _require_lavalink(ctx):
+        return
     if not ctx.guild_id:
         await ctx.send("This only works inside a server.", ephemeral=True)
         return
-    session = music_manager.active_session(int(ctx.guild_id))
-    if not session or not session.current:
+    player = lavalink_client.player_manager.get(int(ctx.guild_id)) if lavalink_client else None
+    if not player or not player.current:
         await ctx.send("Nothing is playing to skip.", ephemeral=True)
         return
-    try:
-        await session.skip()
-    except MusicError as error:
-        await ctx.send(str(error), ephemeral=True)
-        return
+    await player.skip()
     await ctx.send("Skipped the current track.")
 
 
@@ -503,18 +555,16 @@ async def skip_command(ctx: SlashContext):
 async def pause_command(ctx: SlashContext):
     if not await _require_music_permission(ctx):
         return
+    if not await _require_lavalink(ctx):
+        return
     if not ctx.guild_id:
         await ctx.send("This only works inside a server.", ephemeral=True)
         return
-    session = music_manager.active_session(int(ctx.guild_id))
-    if not session:
-        await ctx.send("I'm not in a voice channel right now.", ephemeral=True)
+    player = lavalink_client.player_manager.get(int(ctx.guild_id)) if lavalink_client else None
+    if not player or not player.is_playing or player.paused:
+        await ctx.send("There's nothing playing to pause.", ephemeral=True)
         return
-    try:
-        session.pause()
-    except MusicError as error:
-        await ctx.send(str(error), ephemeral=True)
-        return
+    await player.set_pause(True)
     await ctx.send("Paused the music.")
 
 
@@ -522,64 +572,74 @@ async def pause_command(ctx: SlashContext):
 async def resume_command(ctx: SlashContext):
     if not await _require_music_permission(ctx):
         return
+    if not await _require_lavalink(ctx):
+        return
     if not ctx.guild_id:
         await ctx.send("This only works inside a server.", ephemeral=True)
         return
-    session = music_manager.active_session(int(ctx.guild_id))
-    if not session:
-        await ctx.send("I'm not playing anything right now.", ephemeral=True)
+    player = lavalink_client.player_manager.get(int(ctx.guild_id)) if lavalink_client else None
+    if not player or not player.paused:
+        await ctx.send("I'm not paused right now.", ephemeral=True)
         return
-    try:
-        session.resume()
-    except MusicError as error:
-        await ctx.send(str(error), ephemeral=True)
-        return
+    await player.set_pause(False)
     await ctx.send("Resumed playback.")
 
 
 @slash_command(name="queue", description="Show the current music queue")
 async def queue_command(ctx: SlashContext):
+    if not await _require_lavalink(ctx):
+        return
     if not ctx.guild_id:
         await ctx.send("This command must be used inside a server.", ephemeral=True)
         return
-    session = music_manager.active_session(int(ctx.guild_id))
-    if not session or (not session.current and not session.queue):
+    player = lavalink_client.player_manager.get(int(ctx.guild_id)) if lavalink_client else None
+    if not player or (not player.current and not player.queue):
         await ctx.send("Nothing is queued up right now.")
         return
-
     lines: List[str] = []
-    if session.current:
+    if player.current:
         lines.append(
-            f"**Now playing:** {session.current.title} (`{session.current.pretty_duration}`) — requested by {session.current.requested_by}"
+            f"**Now playing:** {player.current.title} (`{_format_duration(player.current.duration)}`) ? requested by <@{player.current.requester}>"
         )
-    queued_tracks = list(session.queue)
-    if queued_tracks:
+    if player.queue:
         lines.append("")
         lines.append("**Up next:**")
-        for index, track in enumerate(queued_tracks[:10], start=1):
-            lines.append(f"{index}. {track.title} (`{track.pretty_duration}`) — requested by {track.requested_by}")
-        remaining = len(queued_tracks) - 10
+        for index, track in enumerate(player.queue[:10], start=1):
+            lines.append(
+                f"{index}. {track.title} (`{_format_duration(track.duration)}`) ? requested by <@{track.requester}>"
+            )
+        remaining = len(player.queue) - 10
         if remaining > 0:
             lines.append(f"...and {remaining} more.")
-
     await ctx.send("\n".join(lines))
+
 
 
 @slash_command(name="stop", description="Stop playback and clear the queue")
 async def stop_command(ctx: SlashContext):
     if not await _require_music_permission(ctx):
         return
+    if not await _require_lavalink(ctx):
+        return
     if not ctx.guild_id:
         await ctx.send("Use this inside a server.", ephemeral=True)
         return
     guild_id = int(ctx.guild_id)
+    player = lavalink_client.player_manager.get(guild_id) if lavalink_client else None
     session = music_manager.active_session(guild_id)
-    if not session:
+    if not player and not session:
         await ctx.send("There's no active music session to stop.", ephemeral=True)
         return
-    await session.disconnect()
+    if player:
+        player.queue.clear()
+        try:
+            await player.stop()
+        except Exception:
+            pass
+        lavalink_client.player_manager.remove(guild_id)
+    if session:
+        await session.disconnect()
     await ctx.send("Music stopped and the bot left the voice channel.")
-
 
 def _bot_was_mentioned(content: str, bot_id: int) -> bool:
     mention_patterns = (f"<@{bot_id}>", f"<@!{bot_id}>")
