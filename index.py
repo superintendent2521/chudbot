@@ -307,10 +307,10 @@ class LavalinkEvents:
         self.manager.cancel_idle(event.player.guild_id)
     @lavalink.listener(lavalink.TrackEndEvent)
     async def track_end(self, event: lavalink.TrackEndEvent) -> None:
-        if event.reason and event.reason.may_start_next():
-            await event.player.play()
-        elif not event.player.queue:
-            await self.manager.schedule_idle(event.player.guild_id)
+        # Lavalink's DefaultPlayer already advances the queue. Only start the idle timer if nothing else is playing.
+        if event.player.queue or event.player.is_playing:
+            return
+        await self.manager.schedule_idle(event.player.guild_id)
 
     @lavalink.listener(lavalink.QueueEndEvent)
     async def queue_end(self, event: lavalink.QueueEndEvent) -> None:
