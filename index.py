@@ -3,19 +3,28 @@ import os
 import aiohttp
 import asyncio
 import logging
-from typing import Callable, Dict, List, Optional
+import json
+from typing import Any, Callable, Dict, List, Optional, Union
 from dotenv import load_dotenv
 from interactions import (
     Client,
     Intents,
     OptionType,
+    Role,
+    Member,
     SlashContext,
     listen,
     slash_command,
     slash_option,
 )
 from interactions.api.events import RawGatewayEvent, WebsocketReady
-from interactions.api.events.discord import MessageCreate, VoiceUserJoin, VoiceUserLeave
+from interactions.api.events.discord import (
+    MessageCreate,
+    MessageReactionAdd,
+    MessageReactionRemove,
+    VoiceUserJoin,
+    VoiceUserLeave,
+)
 import lavalink
 
 # Load environment variables
@@ -26,6 +35,10 @@ logger = logging.getLogger("chuds.bot")
 MUSIC_IDLE_TIMEOUT = 90
 VOICE_CONNECT_TIMEOUT = 15
 DEFAULT_PLAYER_VOLUME = 50
+REACTION_ROLE_ADMIN_ROLE_ID = 1_434_633_532_436_648_126
+DEFAULT_REACTION_ROLE_EMOJI = "🥀"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+REACTION_ROLE_DATA_FILE = os.path.join(BASE_DIR, "reaction_roles.json")
 
 # Environment switch (change to 'dev' for development)
 ENVIRONMENT = 'main'  # or 'dev'
@@ -83,6 +96,79 @@ if not MUSIC_AVAILABLE:
 
 user_memories: Dict[int, List[dict]] = {}
 lavalink_client: Optional[lavalink.Client] = None
+ReactionRoleEntry = Dict[str, Union[int, str]]
+
+
+class ReactionRoleStore:
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.entries: Dict[int, ReactionRoleEntry] = {}
+        self.load()
+
+    def load(self) -> None:
+        try:
+            with open(self.path, "r", encoding="utf-8") as file:
+                raw = json.load(file)
+        except FileNotFoundError:
+            self.entries = {}
+            return
+        except json.JSONDecodeError as error:
+            logger.error("Failed to parse reaction role file %s: %s", self.path, error)
+            self.entries = {}
+            return
+
+        loaded: Dict[int, ReactionRoleEntry] = {}
+        if isinstance(raw, dict):
+            for raw_message_id, payload in raw.items():
+                if not isinstance(payload, dict):
+                    continue
+                try:
+                    message_id = int(raw_message_id)
+                    guild_id = int(payload.get("guild_id"))
+                    channel_id = int(payload.get("channel_id"))
+                    role_id = int(payload.get("role_id"))
+                except (TypeError, ValueError):
+                    logger.warning("Ignoring malformed reaction role entry %s", raw_message_id)
+                    continue
+                emoji = str(payload.get("emoji") or DEFAULT_REACTION_ROLE_EMOJI)
+                loaded[message_id] = {
+                    "guild_id": guild_id,
+                    "channel_id": channel_id,
+                    "role_id": role_id,
+                    "emoji": emoji,
+                }
+        self.entries = loaded
+
+    def save(self) -> None:
+        serializable = {str(message_id): entry for message_id, entry in self.entries.items()}
+        try:
+            with open(self.path, "w", encoding="utf-8") as file:
+                json.dump(serializable, file, indent=2)
+        except Exception as error:
+            logger.error("Failed to persist reaction role data: %s", error)
+
+    def set_entry(self, message_id: int, *, guild_id: int, channel_id: int, role_id: int, emoji: str) -> None:
+        self.entries[message_id] = {
+            "guild_id": guild_id,
+            "channel_id": channel_id,
+            "role_id": role_id,
+            "emoji": emoji,
+        }
+        self.save()
+
+    def remove_entry(self, message_id: int) -> None:
+        if message_id in self.entries:
+            self.entries.pop(message_id)
+            self.save()
+
+    def get_entry(self, message_id: int) -> Optional[ReactionRoleEntry]:
+        return self.entries.get(message_id)
+
+    def all_entries(self) -> Dict[int, ReactionRoleEntry]:
+        return dict(self.entries)
+
+
+reaction_role_store = ReactionRoleStore(REACTION_ROLE_DATA_FILE)
 
 
 class MusicError(Exception):
@@ -343,6 +429,157 @@ def _get_voice_channel(member):
     return None
 
 
+def _snowflake_to_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    candidate = getattr(value, "id", None)
+    if candidate is not None:
+        try:
+            return int(candidate)
+        except (TypeError, ValueError):
+            return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _member_has_role_id(member: Optional[Member], target_role_id: int) -> bool:
+    if not member or not target_role_id:
+        return False
+    try:
+        for role in getattr(member, "roles", []) or []:
+            role_id = _snowflake_to_int(getattr(role, "id", role))
+            if role_id == target_role_id:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _emoji_matches(emoji_obj, target: str) -> bool:
+    if not emoji_obj or not target:
+        return False
+    name = getattr(emoji_obj, "name", None)
+    if name and name == target:
+        return True
+    emoji_id = getattr(emoji_obj, "id", None)
+    if emoji_id and str(emoji_id) == target:
+        return True
+    try:
+        return str(emoji_obj) == target
+    except Exception:
+        return False
+
+
+async def _get_member_from_reaction_event(event) -> Optional[Member]:
+    author = getattr(event, "author", None)
+    if isinstance(author, Member):
+        return author
+
+    message = getattr(event, "message", None)
+    guild_id = None
+    if message is not None:
+        guild = getattr(message, "guild", None)
+        if guild is not None:
+            guild_id = _snowflake_to_int(getattr(guild, "id", guild))
+        if guild_id is None:
+            guild_id = _snowflake_to_int(getattr(message, "_guild_id", None))
+    if guild_id is None:
+        guild_id = _snowflake_to_int(getattr(event, "guild_id", None))
+
+    user_id = _snowflake_to_int(getattr(author, "id", None))
+
+    if guild_id is None or user_id is None:
+        return None
+
+    client = getattr(event, "client", None)
+    if not client:
+        return None
+    try:
+        return await client.fetch_member(guild_id, user_id)
+    except Exception as error:
+        logger.warning(
+            "Unable to fetch member %s in guild %s for reaction role: %s",
+            user_id,
+            guild_id,
+            error,
+        )
+        return None
+
+
+async def _handle_reaction_role_event(event, *, grant: bool) -> None:
+    message_obj = getattr(event, "message", None)
+    reaction_obj = getattr(event, "reaction", None)
+    raw_message_id = None
+    for candidate in (
+        getattr(message_obj, "id", None),
+        getattr(reaction_obj, "message_id", None),
+        getattr(event, "message_id", None),
+    ):
+        if candidate:
+            raw_message_id = candidate
+            break
+
+    message_id = raw_message_id
+    emoji = getattr(event, "emoji", None)
+    if not message_id or not emoji:
+        logger.debug("Reaction event missing message/emoji: %s", event)
+        return
+    try:
+        message_id_int = int(getattr(message_id, "id", message_id))
+    except (TypeError, ValueError):
+        logger.debug("Unable to parse message id %r for reaction event", message_id)
+        return
+    entry = reaction_role_store.get_entry(message_id_int)
+    if not entry:
+        logger.debug("No reaction role entry for message %s", message_id_int)
+        return
+    if not _emoji_matches(emoji, str(entry.get("emoji", ""))):
+        logger.debug("Emoji %s did not match configured %s for message %s", emoji, entry.get("emoji"), message_id_int)
+        return
+    member = await _get_member_from_reaction_event(event)
+    if not member:
+        logger.debug("Failed to resolve member for reaction event on message %s", message_id_int)
+        return
+    user = getattr(member, "user", None)
+    if user and getattr(user, "bot", False):
+        return
+    role_id = int(entry["role_id"])
+    action = "opt-in" if grant else "opt-out"
+    try:
+        if grant:
+            if member.has_role(role_id):
+                return
+            await member.add_role(role_id, reason=f"Reaction role {action}")
+            logger.info(
+                "Granted role %s to %s via reaction message %s",
+                role_id,
+                getattr(member, "id", "unknown"),
+                message_id_int,
+            )
+        else:
+            if not member.has_role(role_id):
+                return
+            await member.remove_role(role_id, reason=f"Reaction role {action}")
+            logger.info(
+                "Removed role %s from %s via reaction message %s",
+                role_id,
+                getattr(member, "id", "unknown"),
+                message_id_int,
+            )
+    except Exception as error:
+        logger.error(
+            "Failed to update reaction role %s for member %s (%s): %s",
+            role_id,
+            getattr(member, "display_name", member.id),
+            action,
+            error,
+        )
+
+
 async def _require_music_permission(ctx: SlashContext) -> bool:
     if _has_music_control(ctx.author):
         return True
@@ -405,7 +642,7 @@ def _format_uptime(uptime_ms: Optional[int]) -> str:
 
 bot = Client(
     token=BOT_TOKEN,
-    intents=Intents.DEFAULT | Intents.GUILD_VOICE_STATES,
+    intents=Intents.DEFAULT | Intents.GUILD_VOICE_STATES | Intents.GUILD_MESSAGE_REACTIONS,
 )
 
 
@@ -483,6 +720,73 @@ async def my_command_function(ctx: SlashContext):
     await ctx.send(f"version: {ENVIRONMENT}")
 
 
+@slash_command(name="reaction", description="Create a reaction role message in this channel.")
+@slash_option(
+    name="role",
+    description="Role to grant when members react.",
+    opt_type=OptionType.ROLE,
+    required=True,
+)
+async def create_reaction_role(ctx: SlashContext, role: Role):
+    if not ctx.guild_id:
+        await ctx.send("Use this command inside a server.", ephemeral=True)
+        return
+    if not _member_has_role_id(ctx.author, REACTION_ROLE_ADMIN_ROLE_ID):
+        await ctx.send(
+            f"You need the <@&{REACTION_ROLE_ADMIN_ROLE_ID}> role to create reaction role messages.",
+            ephemeral=True,
+        )
+        return
+
+    channel = ctx.channel
+    if not channel or not getattr(channel, "send", None):
+        channel_id = getattr(ctx, "channel_id", None)
+        if channel_id:
+            try:
+                channel = await ctx.client.fetch_channel(int(channel_id))
+            except Exception as error:
+                logger.error("Unable to fetch channel %s for reaction role: %s", channel_id, error)
+                channel = None
+    if not channel or not getattr(channel, "send", None):
+        await ctx.send("I can't post messages in this location. Please try again elsewhere.", ephemeral=True)
+        return
+
+    message_content = (
+        f"React with {DEFAULT_REACTION_ROLE_EMOJI} to receive {role.mention}.\n"
+        "Remove your reaction to have the role removed."
+    )
+    try:
+        reaction_message = await channel.send(message_content)
+        await reaction_message.add_reaction(DEFAULT_REACTION_ROLE_EMOJI)
+    except Exception as error:
+        logger.error(
+            "Failed to send reaction role message in channel %s: %s",
+            getattr(channel, "id", "unknown"),
+            error,
+        )
+        await ctx.send("I couldn't post the reaction role message. Double-check my permissions and try again.", ephemeral=True)
+        return
+
+    channel_obj = getattr(reaction_message, "channel", None)
+    stored_channel_id = _snowflake_to_int(getattr(channel_obj, "id", None)) or _snowflake_to_int(getattr(ctx, "channel_id", None))
+    if stored_channel_id is None:
+        stored_channel_id = 0
+
+    reaction_role_store.set_entry(
+        int(getattr(reaction_message, "id", reaction_message)),
+        guild_id=int(ctx.guild_id),
+        channel_id=stored_channel_id,
+        role_id=int(role.id),
+        emoji=DEFAULT_REACTION_ROLE_EMOJI,
+    )
+    message_url = f"https://discord.com/channels/{ctx.guild_id}/{stored_channel_id}/{reaction_message.id}"
+    channel_mention = getattr(channel, "mention", f"<#{stored_channel_id}>")
+    await ctx.send(
+        f"Reaction role message created in {channel_mention} for {role.mention}.\n<{message_url}>",
+        ephemeral=True,
+    )
+
+
 async def _get_sendable_channel(client, channel_id: int):
     """Return a channel that exposes send(), or None if unavailable."""
     channel = client.cache.get_channel(channel_id)
@@ -525,6 +829,16 @@ async def on_voice_leave(event: VoiceUserLeave):
     await channel.send(
         f"❌ **{event.author.username}** left **{event.channel.name}**"
     )
+
+@listen(MessageReactionAdd)
+async def on_reaction_role_add(event: MessageReactionAdd):
+    await _handle_reaction_role_event(event, grant=True)
+
+
+@listen(MessageReactionRemove)
+async def on_reaction_role_remove(event: MessageReactionRemove):
+    await _handle_reaction_role_event(event, grant=False)
+
 
 @listen(WebsocketReady)
 async def on_gateway_ready(event: WebsocketReady):
