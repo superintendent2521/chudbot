@@ -89,29 +89,111 @@ class MusicError(Exception):
     """Raised when the music subsystem encounters an issue."""
 
 
+async def _issue_voice_state_update(
+    client: Client,
+    guild_id: int,
+    channel_id: Optional[int],
+    *,
+    deafened: bool = False,
+) -> None:
+    """Send a VOICE_STATE_UPDATE and wait for Discord to acknowledge it."""
+    if not client.user:
+        raise MusicError("Bot user is not ready yet. Try again in a moment.")
+
+    expected_guild = str(guild_id)
+    expected_user = str(client.user.id)
+    expected_channel = str(channel_id) if channel_id is not None else None
+
+    def _state_check(event: RawGatewayEvent) -> bool:
+        data = event.data if isinstance(event.data, dict) else None
+        if not data:
+            return False
+        if str(data.get("guild_id")) != expected_guild:
+            return False
+        if str(data.get("user_id")) != expected_user:
+            return False
+        current_channel = data.get("channel_id")
+        if expected_channel is None:
+            return current_channel is None
+        return str(current_channel) == expected_channel
+
+    def _server_check(event: RawGatewayEvent) -> bool:
+        data = event.data if isinstance(event.data, dict) else None
+        return bool(data and str(data.get("guild_id")) == expected_guild)
+
+    state_waiter = asyncio.create_task(
+        client.wait_for(
+            "raw_voice_state_update",
+            checks=_state_check,
+            timeout=VOICE_CONNECT_TIMEOUT,
+        )
+    )
+    server_waiter: Optional[asyncio.Task] = None
+    if channel_id is not None:
+        server_waiter = asyncio.create_task(
+            client.wait_for(
+                "raw_voice_server_update",
+                checks=_server_check,
+                timeout=VOICE_CONNECT_TIMEOUT,
+            )
+        )
+
+    try:
+        await client._connection_state.gateway.voice_state_update(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            muted=False,
+            deafened=deafened,
+        )
+        await state_waiter
+        if server_waiter:
+            await server_waiter
+    finally:
+        for waiter in (state_waiter, server_waiter):
+            if waiter and not waiter.done():
+                waiter.cancel()
+
+
 class GuildMusicSession:
     def __init__(self, guild_id: int, cleanup_callback: Callable[[int], None]) -> None:
         self.guild_id = guild_id
-        self.voice_state = None
         self.idle_task: Optional[asyncio.Task] = None
         self._cleanup_callback = cleanup_callback
+        self._client: Optional[Client] = None
+        self._channel_id: Optional[int] = None
 
     async def ensure_connected(self, channel) -> None:
-        if self.voice_state and getattr(self.voice_state, "channel", None):
-            current_channel = self.voice_state.channel
-            if current_channel and current_channel.id == channel.id:
-                return
-            await self.voice_state.move(channel.id)
+        client = getattr(channel, "_client", None)
+        if not client:
+            logger.error(
+                "Voice channel %s in guild %s is missing a client reference",
+                getattr(channel, "id", "unknown"),
+                self.guild_id,
+            )
+            raise MusicError("I couldn't figure out how to join that voice chat. Please try again.")
+
+        self._client = client
+        target_id = int(channel.id)
+        if self._channel_id == target_id:
             return
-        self.voice_state = await channel.connect()
+
+        logger.info("Requesting voice connection to channel %s in guild %s", target_id, self.guild_id)
+        await _issue_voice_state_update(client, self.guild_id, target_id, deafened=False)
+        self._channel_id = target_id
 
     async def disconnect(self) -> None:
         self.cancel_idle_timer()
-        if self.voice_state:
+        if self._client and self._channel_id is not None:
             try:
-                await self.voice_state.disconnect()
-            finally:
-                self.voice_state = None
+                await _issue_voice_state_update(self._client, self.guild_id, None, deafened=False)
+            except Exception as error:
+                logger.warning(
+                    "Failed to disconnect voice session in guild %s: %s",
+                    self.guild_id,
+                    error,
+                )
+        self._channel_id = None
+        self._client = None
         if lavalink_client:
             player = lavalink_client.player_manager.get(self.guild_id)
             if player:
@@ -129,15 +211,32 @@ class GuildMusicSession:
 
     def cancel_idle_timer(self) -> None:
         if self.idle_task and not self.idle_task.done():
-            self.idle_task.cancel()
+            current = asyncio.current_task()
+            if current is not self.idle_task:
+                self.idle_task.cancel()
         self.idle_task = None
 
     async def _disconnect_when_idle(self) -> None:
         try:
-            await asyncio.sleep(MUSIC_IDLE_TIMEOUT)
-        except asyncio.CancelledError:  # pragma: no cover
-            return
-        await self.disconnect()
+            try:
+                await asyncio.sleep(MUSIC_IDLE_TIMEOUT)
+            except asyncio.CancelledError:  # pragma: no cover
+                return
+
+            player = None
+            if lavalink_client:
+                player = lavalink_client.player_manager.get(self.guild_id)
+
+            if player and (player.is_playing or player.queue):
+                logger.info(
+                    "Idle timer aborted for guild %s because playback resumed.",
+                    self.guild_id,
+                )
+                return
+
+            await self.disconnect()
+        finally:
+            self.idle_task = None
 
 
 class MusicManager:
@@ -275,6 +374,35 @@ def _format_duration(duration_ms: Optional[int]) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes}:{seconds:02d}"
+
+
+def _format_bytes(num_bytes: Optional[int]) -> str:
+    value = float(max(num_bytes or 0, 0))
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return "0 B"
+
+
+def _format_uptime(uptime_ms: Optional[int]) -> str:
+    total_seconds = max(int((uptime_ms or 0) // 1000), 0)
+    days, remainder = divmod(total_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or days:
+        parts.append(f"{hours}h")
+    if minutes or hours or days:
+        parts.append(f"{minutes}m")
+    parts.append(f"{seconds}s")
+    return " ".join(parts)
+
 bot = Client(
     token=BOT_TOKEN,
     intents=Intents.DEFAULT | Intents.GUILD_VOICE_STATES,
@@ -460,6 +588,58 @@ async def mcstatus_command(ctx: SlashContext):
         await ctx.send(f"?s??,? Error checking server status: {str(e)}")
 
 
+@slash_command(name="lavalinkstats", description="Show Lavalink node statistics")
+async def lavalink_stats_command(ctx: SlashContext):
+    if not await _require_lavalink(ctx):
+        return
+    await ctx.defer(ephemeral=True)
+    if not lavalink_client:
+        await ctx.send("Music playback isn't configured.", ephemeral=True)
+        return
+
+    nodes = list(getattr(getattr(lavalink_client, "node_manager", None), "nodes", []))
+    if not nodes:
+        await ctx.send("No Lavalink nodes are registered with this bot.", ephemeral=True)
+        return
+
+    sections: List[str] = []
+    for node in nodes:
+        node_name = getattr(node, "name", "Lavalink Node")
+        stats = node.stats
+        if getattr(stats, "is_fake", True):
+            try:
+                raw_stats = await node.get_stats()
+            except Exception as error:
+                logger.warning("Unable to refresh Lavalink stats for %s: %s", node_name, error)
+            else:
+                stats = lavalink.Stats(node, raw_stats)
+                node.stats = stats
+        status_label = "Online" if getattr(node, "available", False) else "Offline"
+        if getattr(stats, "is_fake", True):
+            sections.append(f"**{node_name}** ({status_label})\nStatistics are not available yet. Try again shortly.")
+            continue
+
+        lines = [
+            f"**{node_name}** ({status_label})",
+            f"Players: {stats.playing_players}/{stats.players} playing",
+            f"Uptime: {_format_uptime(stats.uptime)}",
+            f"CPU: {stats.cpu_cores} cores | system {stats.system_load * 100:.1f}% | lavalink {stats.lavalink_load * 100:.1f}%",
+            (
+                "Memory: "
+                f"{_format_bytes(stats.memory_used)} used / {_format_bytes(stats.memory_allocated)} allocated "
+                f"(free {_format_bytes(stats.memory_free)})"
+            ),
+            (
+                "Frames: "
+                f"sent {stats.frames_sent:,} | nulled {stats.frames_nulled:,} | deficit {stats.frames_deficit:,}"
+            ),
+            f"Penalty: {stats.penalty.total:.2f}",
+        ]
+        sections.append("\n".join(lines))
+
+    await ctx.send("\n\n".join(sections), ephemeral=True)
+
+
 @slash_command(name="play", description="Queue music from YouTube or YouTube Music")
 @slash_option(
     name="query",
@@ -484,6 +664,7 @@ async def play_command(ctx: SlashContext, query: str):
     await ctx.defer()
     guild_id = int(ctx.guild_id)
     session = music_manager.get_session(guild_id)
+    session.cancel_idle_timer()
     player = music_manager.get_player(guild_id)
     if DEFAULT_PLAYER_VOLUME != player.volume:
         try:
@@ -491,11 +672,17 @@ async def play_command(ctx: SlashContext, query: str):
         except Exception as error:
             logger.warning("Unable to set player volume to %s: %s", DEFAULT_PLAYER_VOLUME, error)
     try:
-        await asyncio.wait_for(session.ensure_connected(voice_channel), timeout=VOICE_CONNECT_TIMEOUT)
+        await session.ensure_connected(voice_channel)
     except asyncio.TimeoutError:
         if lavalink_client:
             lavalink_client.player_manager.remove(guild_id)
         await ctx.send("I couldn't join that voice chat in time. Please try again.", ephemeral=True)
+        return
+    except MusicError as error:
+        logger.error("Unable to process voice connection for guild %s: %s", guild_id, error)
+        if lavalink_client:
+            lavalink_client.player_manager.remove(guild_id)
+        await ctx.send(str(error), ephemeral=True)
         return
     except Exception as error:
         logger.error("Failed to connect to voice channel %s: %s", voice_channel.id, error)
