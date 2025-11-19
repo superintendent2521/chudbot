@@ -40,19 +40,20 @@ def setup(handler: CommandHandler) -> None:
                                 )
 
                             await ctx.send(
-                                f"?o. **{server_address} is ONLINE**\n"
+                                f"✅ **{server_address} is ONLINE**\n"
                                 f"**MOTD:** {motd}\n"
                                 f"**Players:** {players}"
                                 f"{player_list}\n"
                             )
                         else:
-                            await ctx.send(f"??O **{server_address} is OFFLINE**")
+                            await ctx.send(f"❌ **{server_address} is OFFLINE**")
                     else:
-                        await ctx.send(f"?s??,? Failed to check server status (HTTP {response.status})")
+                        await ctx.send(f"Failed to check server status (HTTP {response.status})")
         except asyncio.TimeoutError:
-            await ctx.send("?s??,? Timed out while reaching the status API.")
+            await ctx.send("Timed out while reaching the status API.")
         except Exception as error:
-            await ctx.send(f"?s??,? Error checking server status: {error}")
+            handler.resources.logger.error("Error checking mcstatus for %s: %s", server_address, error)
+            await ctx.send("An error occurred while checking the server status.")
 
     handler.register_slash_command(mcstatus_command)
 
