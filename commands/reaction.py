@@ -69,7 +69,8 @@ def setup(handler: CommandHandler) -> None:
             getattr(ctx, "channel_id", None)
         )
         if stored_channel_id is None:
-            stored_channel_id = 0
+            await ctx.send("Could not determine the channel ID for the message. Reaction role not created.", ephemeral=True)
+            return
 
         store.set_entry(
             int(getattr(reaction_message, "id", reaction_message)),
