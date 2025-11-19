@@ -215,9 +215,10 @@ async def _handle_reaction_role_event(
                 return
             await member.add_role(role_id, reason=f"Reaction role {action}")
             logger.info(
-                "Granted role %s to %s via reaction message %s",
+                "Granted role %s to %s (%s) via reaction message %s",
                 role_id,
-                getattr(member, "id", "unknown"),
+                member.display_name,
+                member.id,
                 message_id_int,
             )
         else:

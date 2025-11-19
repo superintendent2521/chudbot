@@ -171,8 +171,7 @@ def setup(handler: CommandHandler) -> None:
         if player.current:
             lines.append(
                 f"**Now playing:** {player.current.title} (`{format_duration(player.current.duration)}`) "
-                f"? requested by <@{player.current.requester}>"
-            )
+                f"requested by <@{player.current.requester}>"
         if player.queue:
             lines.append("")
             lines.append("**Up next:**")
@@ -202,7 +201,11 @@ def setup(handler: CommandHandler) -> None:
         if not player and not session:
             await ctx.send("There's no active music session to stop.", ephemeral=True)
             return
-        if player:
+
+        if session:
+            await session.disconnect()
+        elif player:
+            # This is a fallback in case a player exists without a session
             player.queue.clear()
             try:
                 await player.stop()
@@ -210,8 +213,7 @@ def setup(handler: CommandHandler) -> None:
                 pass
             if lavalink_client:
                 lavalink_client.player_manager.remove(guild_id)
-        if session:
-            await session.disconnect()
+
         await ctx.send("Music stopped and the bot left the voice channel.")
 
     handler.register_slash_command(play_command)
