@@ -36,21 +36,20 @@ def create_voice_logging_listeners(log_channel_id: int, logger: logging.Logger) 
     async def on_voice_join(event: VoiceUserJoin):
         channel = await _get_sendable_channel(event.client, log_channel_id, logger)
         if not channel:
-            print(f"�s��,? Cannot log join: channel {log_channel_id} not found.")
+            print(f"⚠️ Cannot log join: channel {log_channel_id} not found.")
             return
         await channel.send(
-            f"dYZT�,? **{event.author.username}** joined **{event.channel.name}**"
+            f"🔊 **{event.author.username}** joined **{event.channel.name}**"
         )
 
     @listen(VoiceUserLeave)
     async def on_voice_leave(event: VoiceUserLeave):
         channel = await _get_sendable_channel(event.client, log_channel_id, logger)
         if not channel:
-            print(f"�s��,? Cannot log leave: channel {log_channel_id} not found.")
+            print(f"⚠️ Cannot log leave: channel {log_channel_id} not found.")
             return
         await channel.send(
-            f"�?O **{event.author.username}** left **{event.channel.name}**"
+            f"🔇 **{event.author.username}** left **{event.channel.name}**"
         )
 
     return on_voice_join, on_voice_leave
-
