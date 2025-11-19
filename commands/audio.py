@@ -85,7 +85,7 @@ def setup(handler: CommandHandler) -> None:
 
         if result.load_type == lavalink.LoadType.PLAYLIST:
             for track in result.tracks:
-                track.requester = ctx.author.id  # type: ignore[attr-defined]
+                track.extra["requester"] = ctx.author.id
                 player.add(track)
             playlist_name = result.playlist_info.name if result.playlist_info else "Playlist"
             await ctx.send(
