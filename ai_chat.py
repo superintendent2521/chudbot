@@ -31,7 +31,7 @@ class AiChatService:
         self.system_prompt = system_prompt
         self.max_memory_messages = max_memory_messages
         self.model_id = model_id
-        self.user_memories: Dict[int, List[dict]] = {}
+        self.user_memories: Dict[int, deque] = defaultdict(lambda: deque(maxlen=self.max_memory_messages))
 
     def create_listener(self):
         service = self
@@ -118,10 +118,7 @@ class AiChatService:
         return content.strip()
 
     def _append_memory(self, user_id: int, role: str, message: str) -> None:
-        history = self.user_memories.setdefault(user_id, [])
-        history.append({"role": role, "content": message})
-        if len(history) > self.max_memory_messages:
-            history[:] = history[-self.max_memory_messages :]
+        self.user_memories[user_id].append({"role": role, "content": message})
 
     async def _query_openrouter(self, messages: List[dict]) -> str:
         if not self.openrouter_api_key:
