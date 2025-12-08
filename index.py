@@ -14,6 +14,8 @@ from reaction_roles import (
     snowflake_to_int,
 )
 from voice_logging import create_voice_logging_listeners
+from member_join_handler import create_member_join_listeners
+from gem_reactions import create_gem_reaction_listeners
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -40,6 +42,8 @@ try:
     LOG_CHANNEL_ID = int(LOG_CHANNEL_ID_SANITIZED)
 except ValueError as exc:
     raise ValueError(f"LOG_CHANNEL_ID must be numeric, got {LOG_CHANNEL_ID_RAW!r}") from exc
+
+GEM_CHANNEL_ID = 1447398899588530196
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL", "")
@@ -109,8 +113,8 @@ ai_service = AiChatService(
 
 bot = Client(
     token=BOT_TOKEN,
-    intents=Intents.DEFAULT | Intents.GUILD_VOICE_STATES | Intents.GUILD_MESSAGE_REACTIONS,
-)
+    intents=Intents.DEFAULT | Intents.GUILD_VOICE_STATES | Intents.GUILD_MESSAGE_REACTIONS | Intents.GUILD_MEMBERS | Intents.MESSAGE_CONTENT
+    )
 
 command_resources = CommandResources(
     environment=ENVIRONMENT,
@@ -139,6 +143,10 @@ for listener in create_reaction_role_listeners(reaction_role_store, logger):
 for listener in music_runtime.create_gateway_listeners():
     bot.add_listener(listener)
 for listener in create_voice_logging_listeners(LOG_CHANNEL_ID, logger):
+    bot.add_listener(listener)
+for listener in create_member_join_listeners(logger):
+    bot.add_listener(listener)
+for listener in create_gem_reaction_listeners(GEM_CHANNEL_ID, logger):
     bot.add_listener(listener)
 bot.add_listener(ai_service.create_listener())
 
