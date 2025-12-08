@@ -172,13 +172,14 @@ def setup(handler: CommandHandler) -> None:
             lines.append(
                 f"**Now playing:** {player.current.title} (`{format_duration(player.current.duration)}`) "
                 f"requested by <@{player.current.requester}>"
+            )
         if player.queue:
             lines.append("")
             lines.append("**Up next:**")
             for index, track in enumerate(player.queue[:10], start=1):
                 lines.append(
                     f"{index}. {track.title} (`{format_duration(track.duration)}`) "
-                    f"? requested by <@{track.requester}>"
+                    f"requested by <@{track.requester}>"
                 )
             remaining = len(player.queue) - 10
             if remaining > 0:
