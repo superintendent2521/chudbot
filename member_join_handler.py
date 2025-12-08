@@ -27,14 +27,12 @@ def create_member_join_listeners(logger: logging.Logger) -> Tuple:
             original_name = member.user.username
             new_nickname = f"john {original_name}"
             
-            # Modify the member's nickname in the guild
-            await event.client.http.modify_current_user_nick(
-                guild_id=event.guild_id,
-                nickname=new_nickname
-            )
+            # FIXED: Use the correct interactions.py method to modify member's nickname
+            # Use the Member.edit() method which is the proper way in interactions.py
+            await member.edit(nickname=new_nickname)
             
             logger.info(
-                "Modified nickname for %s (%s) in guild %s to '%s'",
+                "Modified nickname for member %s (%s) in guild %s to '%s'",
                 original_name,
                 member.user.id,
                 event.guild_id,
