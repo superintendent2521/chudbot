@@ -29,7 +29,7 @@ DEFAULT_REACTION_ROLE_EMOJI = "wilted_rose"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 REACTION_ROLE_DATA_FILE = os.path.join(BASE_DIR, "reaction_roles.json")
 
-ENVIRONMENT = "dev"  # or 'dev'
+ENVIRONMENT = "main"  # or 'dev'
 BOT_TOKEN = os.getenv(f"BOT_TOKEN_{ENVIRONMENT.upper()}")
 
 LOG_CHANNEL_ID_RAW = os.getenv("LOG_CHANNEL_ID")
