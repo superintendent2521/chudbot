@@ -4,7 +4,7 @@ from interactions import OptionType, slash_option, slash_default_member_permissi
 from command_handler import CommandHandler
 from interactions.models.discord.enums import Permissions
 
-from ..warn import add_warn, get_warns, load_warns, save_warns
+from warn import add_warn, get_warns, load_warns, save_warns
 # wildcard but fuck it we ball
 
 def setup(handler: CommandHandler) -> None:
