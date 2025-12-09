@@ -4,7 +4,7 @@ from interactions import OptionType, slash_option, slash_default_member_permissi
 from command_handler import CommandHandler
 from interactions.models.discord.enums import Permissions
 
-from ..warn import *
+from ..warn import add_warn, get_warns, load_warns, save_warns
 # wildcard but fuck it we ball
 
 def setup(handler: CommandHandler) -> None:
@@ -56,3 +56,13 @@ def setup(handler: CommandHandler) -> None:
         except Exception as e:
             await ctx.send(f"❌ Failed to warn {user.mention}: {str(e)}")
     handler.register_slash_command(warn_user)
+    @slash_command(name="warns", description="Get a users warn.")
+    @slash_option(
+        name="user",
+        description="User to ban.", 
+        required=True,
+        opt_type=OptionType.USER
+    )
+    @slash_default_member_permission(Permissions.BAN_MEMBERS)
+    async def get_warn(ctx: SlashContext, user: Member):
+        get_warn()
