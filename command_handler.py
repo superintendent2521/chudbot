@@ -19,20 +19,20 @@ class CommandResources:
     environment: str
     reaction_role_admin_role_id: int
     default_reaction_role_emoji: str
-    reaction_role_store: "ReactionRoleStore"
-    member_has_role: Callable[[Optional[Member], int], bool]
-    snowflake_to_int: Callable[[Any], Optional[int]]
-    require_lavalink: Callable[[SlashContext], Awaitable[bool]]
-    require_music_permission: Callable[[SlashContext], Awaitable[bool]]
-    format_bytes: Callable[[Optional[int]], str]
-    format_duration: Callable[[Optional[int]], str]
-    format_uptime: Callable[[Optional[int]], str]
-    get_lavalink_client: Callable[[], Optional["lavalink.Client"]]
-    music_manager: "MusicManager"
-    default_player_volume: int
-    get_voice_channel: Callable[[Member], Optional[VoiceChannel]]
-    logger: logging.Logger
-    music_error_cls: type
+    reaction_role_store: "ReactionRoleStore" # pyright: ignore[reportUndefinedVariable]
+    member_has_role: Callable[[Optional[Member], int], bool] # type: ignore
+    snowflake_to_int: Callable[[Any], Optional[int]] # type: ignore
+    require_lavalink: Callable[[SlashContext], Awaitable[bool]] # type: ignore
+    require_music_permission: Callable[[SlashContext], Awaitable[bool]] # type: ignore
+    format_bytes: Callable[[Optional[int]], str] # type: ignore
+    format_duration: Callable[[Optional[int]], str] # type: ignore
+    format_uptime: Callable[[Optional[int]], str] # type: ignore
+    get_lavalink_client: Callable[[], Optional["lavalink.Client"]] # type: ignore
+    music_manager: "MusicManager" # type: ignore
+    default_player_volume: int # type: ignore
+    get_voice_channel: Callable[[Member], Optional[VoiceChannel]] # type: ignore
+    logger: logging.Logger # type: ignore
+    music_error_cls: type # type: ignore
 
 
 class CommandHandler:
