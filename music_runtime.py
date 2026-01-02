@@ -7,7 +7,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import lavalink
-from interactions import Client, Member, SlashContext, listen
+from interactions import Client, Member, SlashContext, User, listen
 from interactions.api.events import RawGatewayEvent, WebsocketReady
 
 
@@ -66,7 +66,7 @@ class MusicRuntime:
         await ctx.send("You can't use music commands while holding the blocked DJ role.", ephemeral=True)
         return False
 
-    def has_music_control(self, member: Member) -> bool:
+    def has_music_control(self, member: Member | User) -> bool:
         if self.music_dj_role_id is None:
             return True
         try:
@@ -151,27 +151,35 @@ class MusicRuntime:
             data = event.data if isinstance(event.data, dict) else None
             return bool(data and str(data.get("guild_id")) == expected_guild)
 
-        state_waiter = asyncio.create_task(
-            client.wait_for(
+        async def _wait_for_state_update() -> RawGatewayEvent:
+            return await client.wait_for(
                 "raw_voice_state_update",
                 checks=_state_check,
                 timeout=self.voice_connect_timeout,
             )
-        )
-        server_waiter: Optional[asyncio.Task] = None
-        if channel_id is not None:
-            server_waiter = asyncio.create_task(
-                client.wait_for(
-                    "raw_voice_server_update",
-                    checks=_server_check,
-                    timeout=self.voice_connect_timeout,
-                )
+
+        async def _wait_for_server_update() -> RawGatewayEvent:
+            return await client.wait_for(
+                "raw_voice_server_update",
+                checks=_server_check,
+                timeout=self.voice_connect_timeout,
             )
 
+        state_waiter = asyncio.create_task(_wait_for_state_update())
+        server_waiter: Optional[asyncio.Task] = None
+        if channel_id is not None:
+            server_waiter = asyncio.create_task(_wait_for_server_update())
+
         try:
-            await client._connection_state.gateway.voice_state_update(
+            connection_state = getattr(client, "_connection_state", None)
+            gateway = getattr(connection_state, "gateway", None)
+            if gateway is None:
+                raise MusicError("Gateway is not ready yet. Try again in a moment.")
+
+            target_channel: Any = channel_id if channel_id is not None else None
+            await gateway.voice_state_update(
                 guild_id=guild_id,
-                channel_id=channel_id,
+                channel_id=target_channel,
                 muted=False,
                 deafened=deafened,
             )
@@ -248,9 +256,10 @@ class MusicRuntime:
             return
         try:
             self.lavalink_client = lavalink.Client(event.client.user.id)
+            port = self.lavalink_port if self.lavalink_port is not None else 2333
             self.lavalink_client.add_node(
                 host=self.lavalink_host,
-                port=self.lavalink_port,
+                port=port,
                 password=self.lavalink_password,
                 region=self.lavalink_region,
                 ssl=self.lavalink_ssl,
@@ -435,7 +444,8 @@ class LavalinkEvents:
 
     @lavalink.listener(lavalink.TrackEndEvent)
     async def track_end(self, event: lavalink.TrackEndEvent) -> None:
-        if event.player.queue or event.player.is_playing:
+        player = event.player
+        if getattr(player, "queue", None) or getattr(player, "is_playing", False):
             return
         await self.manager.schedule_idle(event.player.guild_id)
 
@@ -446,8 +456,15 @@ class LavalinkEvents:
     @lavalink.listener(lavalink.TrackExceptionEvent)
     async def track_exception(self, event: lavalink.TrackExceptionEvent) -> None:
         logger = self.manager.runtime.logger
-        logger.warning("Track exception in guild %s: %s", event.player.guild_id, event.exception)
-        if event.player.queue:
-            await event.player.play()
+        player = event.player
+        logger.warning(
+            "Track exception in guild %s: %s",
+            player.guild_id,
+            getattr(event, "exception", "Unknown error"),
+        )
+        if getattr(player, "queue", None):
+            play = getattr(player, "play", None)
+            if callable(play):
+                await play()
         else:
             await self.manager.schedule_idle(event.player.guild_id)
