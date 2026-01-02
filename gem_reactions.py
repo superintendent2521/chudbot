@@ -3,18 +3,58 @@
 from __future__ import annotations
 
 import logging
-from typing import Set, Tuple
+from typing import Optional, Set, Tuple
 
-from interactions import listen
+from interactions import Member, listen
 from interactions.api.events.discord import MessageReactionAdd
 from interactions.models import Embed
+from reaction_roles import member_has_role, snowflake_to_int
 
 
 GEM_EMOJI = "💎"
 GEM_THRESHOLD = 4
+GEM_CURATOR_ROLE_ID = 1_434_633_532_436_648_126
 
 # Track which messages we've already posted to avoid duplicates
 posted_messages: Set[int] = set()
+
+
+async def _get_member_from_reaction_event(
+    event: MessageReactionAdd, logger: logging.Logger
+) -> Optional[Member]:
+    author = getattr(event, "author", None)
+    if isinstance(author, Member):
+        return author
+
+    message = getattr(event, "message", None)
+    guild_id = None
+    if message is not None:
+        guild = getattr(message, "guild", None)
+        if guild is not None:
+            guild_id = snowflake_to_int(getattr(guild, "id", guild))
+        if guild_id is None:
+            guild_id = snowflake_to_int(getattr(message, "_guild_id", None))
+    if guild_id is None:
+        guild_id = snowflake_to_int(getattr(event, "guild_id", None))
+
+    user_id = snowflake_to_int(getattr(author, "id", None))
+
+    if guild_id is None or user_id is None:
+        return None
+
+    client = getattr(event, "client", None)
+    if not client:
+        return None
+    try:
+        return await client.fetch_member(guild_id, user_id)
+    except Exception as error:
+        logger.warning(
+            "Unable to fetch member %s in guild %s for gem reaction: %s",
+            user_id,
+            guild_id,
+            error,
+        )
+        return None
 
 
 def create_gem_reaction_listeners(
@@ -53,6 +93,16 @@ def create_gem_reaction_listeners(
 
             logger.info(f"Gem emoji detected on message {message.id}")
 
+            member = await _get_member_from_reaction_event(event, logger)
+            force_post = bool(member and member_has_role(member, GEM_CURATOR_ROLE_ID))
+            if force_post:
+                logger.info(
+                    "Bypassing gem threshold: member %s (%s) has curator role %s",
+                    getattr(member, "display_name", None),
+                    getattr(member, "id", None),
+                    GEM_CURATOR_ROLE_ID,
+                )
+
             # Skip if we already posted this message
             if message.id in posted_messages:
                 logger.debug(f"Message {message.id} already posted")
@@ -78,9 +128,11 @@ def create_gem_reaction_listeners(
 
             logger.info(f"Total gem count: {gem_count}, threshold: {GEM_THRESHOLD}")
             # Check if threshold is reached
-            if gem_count < GEM_THRESHOLD:
+            if gem_count < GEM_THRESHOLD and not force_post:
                 logger.debug(f"Gem count {gem_count} is below threshold {GEM_THRESHOLD}")
                 return
+            if force_post and gem_count < GEM_THRESHOLD:
+                gem_count = max(gem_count, 1)
 
             # Get author info
             author = getattr(message, "author", None)
@@ -120,24 +172,32 @@ def create_gem_reaction_listeners(
             logger.info(f"Extracted IDs - Guild: {guild_id}, Channel: {channel_id}, Message: {message.id}")
 
             # Create embed with message content - FIXED: Include original message content
+            base_description = f"Got {gem_count} :gem: reactions"
+            if force_post:
+                base_description += "\nFeatured early by curator reaction."
+            base_description += f"\n\n**Original Message:**\n{message_content[:1000]}"
             embed = Embed(
                 title=f"💎 {username} posted this",
-                description=f"Got {gem_count} :gem: reactions\n\n**Original Message:**\n{message_content[:1000]}",  # Include message content
+                description=base_description,
                 color=0xFFD700,  # Gold color for gems
             )
+
+            description_text = embed.description or ""
 
             # FIXED: Create proper Discord jump link with proper IDs
             if guild_id and channel_id and message.id:
                 try:
                     jump_url = f"https://discord.com/channels/{int(guild_id)}/{int(channel_id)}/{int(message.id)}"
-                    embed.description += f"\n\n[Jump to message]({jump_url})"
+                    description_text += f"\n\n[Jump to message]({jump_url})"
                     logger.info(f"Created jump URL: {jump_url}")
                 except Exception as e:
                     logger.error(f"Failed to create jump URL: {e}")
-                    embed.description += f"\n\n*(Jump link creation failed)*"
+                    description_text += "\n\n*(Jump link creation failed)*"
             else:
                 logger.warning(f"Missing IDs for jump link - Guild: {guild_id}, Channel: {channel_id}, Message: {message.id}")
-                embed.description += f"\n\n*(Jump link unavailable - Missing IDs)*"
+                description_text += "\n\n*(Jump link unavailable - Missing IDs)*"
+
+            embed.description = description_text
 
             # Add image/gif if present
             if hasattr(message, "attachments") and message.attachments:
@@ -167,8 +227,9 @@ def create_gem_reaction_listeners(
             # Send to gem channel
             try:
                 gem_channel = await event.client.fetch_channel(gem_channel_id)
-                if gem_channel:
-                    await gem_channel.send(embed=embed)
+                send = getattr(gem_channel, "send", None) if gem_channel else None
+                if send:
+                    await send(embed=embed)
                     posted_messages.add(message.id)
                     logger.info(
                         "Posted message %s to gem channel. Author: %s, Gem count: %d",
@@ -177,7 +238,7 @@ def create_gem_reaction_listeners(
                         gem_count,
                     )
                 else:
-                    logger.error("Could not fetch gem channel %s", gem_channel_id)
+                    logger.error("Could not fetch gem channel %s or channel is not sendable", gem_channel_id)
             except Exception as e:
                 logger.error("Failed to send to gem channel: %s", e, exc_info=True)
 
