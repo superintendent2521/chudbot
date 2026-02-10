@@ -16,6 +16,8 @@ from reaction_roles import (
 from voice_logging import create_voice_logging_listeners
 from member_join_handler import create_member_join_listeners
 from gem_reactions import create_gem_reaction_listeners
+from fixupx_link_listener import create_fixupx_listener
+from message_delete_logging import create_message_delete_logging_listeners
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +46,7 @@ except ValueError as exc:
     raise ValueError(f"LOG_CHANNEL_ID must be numeric, got {LOG_CHANNEL_ID_RAW!r}") from exc
 
 GEM_CHANNEL_ID = 1447398899588530196
+MESSAGE_DELETE_LOG_CHANNEL_ID = 1_470_612_259_721_052_300
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL", "")
@@ -113,7 +116,12 @@ ai_service = AiChatService(
 
 bot = Client(
     token=BOT_TOKEN,
-    intents=Intents.DEFAULT | Intents.GUILD_VOICE_STATES | Intents.GUILD_MESSAGE_REACTIONS | Intents.GUILD_MEMBERS | Intents.MESSAGE_CONTENT
+    intents=Intents.DEFAULT
+    | Intents.GUILD_VOICE_STATES
+    | Intents.GUILD_MESSAGE_REACTIONS
+    | Intents.GUILD_MEMBERS
+    | Intents.MESSAGE_CONTENT
+    | Intents.GUILD_MESSAGES
     )
 
 command_resources = CommandResources(
@@ -147,6 +155,10 @@ for listener in create_voice_logging_listeners(LOG_CHANNEL_ID, logger):
 for listener in create_member_join_listeners(logger):
     bot.add_listener(listener)
 for listener in create_gem_reaction_listeners(GEM_CHANNEL_ID, logger):
+    bot.add_listener(listener)
+for listener in create_fixupx_listener(logger):
+    bot.add_listener(listener)
+for listener in create_message_delete_logging_listeners(MESSAGE_DELETE_LOG_CHANNEL_ID, logger):
     bot.add_listener(listener)
 bot.add_listener(ai_service.create_listener())
 
