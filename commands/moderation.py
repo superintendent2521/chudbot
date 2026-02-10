@@ -45,6 +45,24 @@ def setup(handler: CommandHandler) -> None:
 
     handler.register_slash_command(ban_user)
 
+    @slash_command(name="unban", description="Unban a user from the server.")
+    @slash_option(
+        name="user",
+        description="User to unban.",
+        required=True,
+        opt_type=OptionType.USER,
+    )
+    @slash_default_member_permission(Permissions.BAN_MEMBERS)
+    async def unban_user(ctx: SlashContext, user: Member):
+        try:
+            reason = f"Unbanned by {ctx.author.display_name}"
+            await ctx.guild.unban(user, reason=reason)
+            await ctx.send(f":white_check_mark: Unbanned {user.mention}.")
+        except Exception as exc:
+            await ctx.send(f":x: Failed to unban {user.mention}: {exc}")
+
+    handler.register_slash_command(unban_user)
+
     @slash_command(name="warn", description="Warn a user.")
     @slash_option(
         name="user",
@@ -122,3 +140,32 @@ def setup(handler: CommandHandler) -> None:
             await ctx.send(f":x: Failed to mute {user.mention}: {exc}")
 
     handler.register_slash_command(mute_user)
+
+    @slash_command(name="unmute", description="Remove a user's timeout.")
+    @slash_option(
+        name="user",
+        description="User to unmute.",
+        required=True,
+        opt_type=OptionType.USER,
+    )
+    @slash_option(
+        name="reason",
+        description="Reason for the unmute (optional).",
+        required=False,
+        opt_type=OptionType.STRING,
+    )
+    @slash_default_member_permission(Permissions.MODERATE_MEMBERS)
+    async def unmute_user(ctx: SlashContext, user: Member, reason: str = ""):
+        if user.id == ctx.guild.me.id:
+            await ctx.send(":x: I cannot unmute myself.")
+            return
+
+        audit_reason = reason or f"Unmuted by {ctx.author.display_name}"
+
+        try:
+            await user.timeout(None, reason=audit_reason)
+            await ctx.send(f":white_check_mark: Unmuted {user.mention}.")
+        except Exception as exc:
+            await ctx.send(f":x: Failed to unmute {user.mention}: {exc}")
+
+    handler.register_slash_command(unmute_user)
