@@ -13,7 +13,7 @@ from reaction_roles import (
     member_has_role,
     snowflake_to_int,
 )
-from voice_logging import create_voice_logging_listeners
+from voice_logging import VoiceLogStore, create_voice_logging_listeners
 from member_join_handler import create_member_join_listeners
 from gem_reactions import create_gem_reaction_listeners
 from fixupx_link_listener import create_fixupx_listener
@@ -30,20 +30,22 @@ REACTION_ROLE_ADMIN_ROLE_ID = 1_434_633_532_436_648_126
 DEFAULT_REACTION_ROLE_EMOJI = "🥀"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 REACTION_ROLE_DATA_FILE = os.path.join(BASE_DIR, "reaction_roles.json")
+VOICE_LOG_DATA_FILE = os.path.join(BASE_DIR, "voice_log_channels.json")
 
 ENVIRONMENT = "main"  # or 'dev'
 BOT_TOKEN = os.getenv(f"BOT_TOKEN_{ENVIRONMENT.upper()}")
 
 LOG_CHANNEL_ID_RAW = os.getenv("LOG_CHANNEL_ID")
-if LOG_CHANNEL_ID_RAW is None:
-    raise RuntimeError("LOG_CHANNEL_ID is missing from environment.")
-LOG_CHANNEL_ID_SANITIZED = "".join(ch for ch in LOG_CHANNEL_ID_RAW if ch.isdigit())
-if not LOG_CHANNEL_ID_SANITIZED:
-    raise ValueError(f"LOG_CHANNEL_ID must contain digits, got {LOG_CHANNEL_ID_RAW!r}")
-try:
-    LOG_CHANNEL_ID = int(LOG_CHANNEL_ID_SANITIZED)
-except ValueError as exc:
-    raise ValueError(f"LOG_CHANNEL_ID must be numeric, got {LOG_CHANNEL_ID_RAW!r}") from exc
+LOG_CHANNEL_ID = None
+if LOG_CHANNEL_ID_RAW:
+    LOG_CHANNEL_ID_SANITIZED = "".join(ch for ch in LOG_CHANNEL_ID_RAW if ch.isdigit())
+    if not LOG_CHANNEL_ID_SANITIZED:
+        logger.warning("LOG_CHANNEL_ID must contain digits, got %r", LOG_CHANNEL_ID_RAW)
+    else:
+        try:
+            LOG_CHANNEL_ID = int(LOG_CHANNEL_ID_SANITIZED)
+        except ValueError:
+            logger.warning("LOG_CHANNEL_ID must be numeric, got %r", LOG_CHANNEL_ID_RAW)
 
 GEM_CHANNEL_ID = 1447398899588530196
 MESSAGE_DELETE_LOG_CHANNEL_ID = 1_470_612_259_721_052_300
@@ -89,6 +91,11 @@ reaction_role_store = ReactionRoleStore(
     REACTION_ROLE_DATA_FILE,
     DEFAULT_REACTION_ROLE_EMOJI,
     logger,
+)
+voice_log_store = VoiceLogStore(
+    VOICE_LOG_DATA_FILE,
+    logger,
+    default_channel_id=LOG_CHANNEL_ID,
 )
 music_runtime = MusicRuntime(
     logger=logger,
@@ -142,6 +149,7 @@ command_resources = CommandResources(
     get_voice_channel=music_runtime.get_voice_channel,
     logger=logger,
     music_error_cls=MusicError,
+    voice_log_store=voice_log_store,
 )
 command_handler = CommandHandler(bot, command_resources)
 command_handler.load_from_package("commands")
@@ -150,7 +158,7 @@ for listener in create_reaction_role_listeners(reaction_role_store, logger):
     bot.add_listener(listener)
 for listener in music_runtime.create_gateway_listeners():
     bot.add_listener(listener)
-for listener in create_voice_logging_listeners(LOG_CHANNEL_ID, logger):
+for listener in create_voice_logging_listeners(voice_log_store, logger):
     bot.add_listener(listener)
 for listener in create_member_join_listeners(logger):
     bot.add_listener(listener)

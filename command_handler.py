@@ -33,6 +33,7 @@ class CommandResources:
     get_voice_channel: Callable[[Member], Optional[VoiceChannel]] # type: ignore
     logger: logging.Logger # type: ignore
     music_error_cls: type # type: ignore
+    voice_log_store: "VoiceLogStore" # type: ignore
 
 
 class CommandHandler:
