@@ -45,6 +45,7 @@ class MusicRuntime:
         self.lavalink_client: Optional[lavalink.Client] = None
         self.manager = MusicManager(self)
         self.voice_channel_ids: Dict[int, int] = {}
+        self.voice_session_ids: Dict[int, str] = {}
 
     def get_lavalink_client(self) -> Optional[lavalink.Client]:
         return self.lavalink_client
@@ -232,6 +233,67 @@ class MusicRuntime:
         except Exception as error:
             self.logger.error("Error forwarding %s to Lavalink: %s", event_name, error)
 
+    async def _send_voice_server_update(self, guild_id: int, data: dict) -> bool:
+        lavalink_client = self.get_lavalink_client()
+        if not lavalink_client:
+            return False
+
+        player = lavalink_client.player_manager.create(guild_id)
+        channel_id = self.voice_channel_ids.get(guild_id)
+        if channel_id is None:
+            channel_id = getattr(player, "channel_id", None)
+        if channel_id is None:
+            self.logger.warning(
+                "Skipping direct voice update for guild %s because no channel id is available.",
+                guild_id,
+            )
+            return False
+
+        session_id = self.voice_session_ids.get(guild_id)
+        if not session_id:
+            self.logger.warning(
+                "Skipping direct voice update for guild %s because no session id is available.",
+                guild_id,
+            )
+            return False
+
+        voice_payload = {
+            "sessionId": session_id,
+            "endpoint": data["endpoint"],
+            "token": data["token"],
+            "channelId": str(channel_id),
+        }
+
+        node = getattr(player, "node", None)
+        update_player = getattr(node, "update_player", None) if node else None
+        if callable(update_player):
+            attempts = (
+                {"guild_id": guild_id, "voice_state": voice_payload},
+                {"guild_id": guild_id, "voice": voice_payload},
+                {"guild_id": str(guild_id), "voice_state": voice_payload},
+                {"guild_id": str(guild_id), "voice": voice_payload},
+            )
+            for kwargs in attempts:
+                try:
+                    await update_player(**kwargs)
+                    self.logger.info(
+                        "Applied direct voice update for guild %s with channelId=%s",
+                        guild_id,
+                        channel_id,
+                    )
+                    return True
+                except TypeError:
+                    continue
+                except Exception as error:
+                    self.logger.warning(
+                        "Direct voice update failed for guild %s via update_player(%s): %s",
+                        guild_id,
+                        ", ".join(kwargs.keys()),
+                        error,
+                    )
+
+        return False
+
     async def handle_raw_voice_state(self, event: RawGatewayEvent) -> None:
         if not self.lavalink_ready():
             return
@@ -253,12 +315,16 @@ class MusicRuntime:
 
         guild_id = data.get("guild_id")
         channel_id = data.get("channel_id")
+        session_id = data.get("session_id")
         if guild_id is not None:
             guild_key = int(guild_id)
             if channel_id is None:
                 self.voice_channel_ids.pop(guild_key, None)
+                self.voice_session_ids.pop(guild_key, None)
             else:
                 self.voice_channel_ids[guild_key] = int(channel_id)
+                if session_id:
+                    self.voice_session_ids[guild_key] = str(session_id)
 
         payload = self._gateway_payload("VOICE_STATE_UPDATE", dict(data))
         await self._forward_voice_event("VOICE_STATE_UPDATE", payload)
@@ -294,6 +360,9 @@ class MusicRuntime:
                     channel_id = getattr(player, "channel_id", None) if player else None
             if channel_id is not None:
                 payload_data["channel_id"] = str(channel_id)
+
+        if await self._send_voice_server_update(guild_key, payload_data):
+            return
 
         payload = self._gateway_payload("VOICE_SERVER_UPDATE", payload_data)
         await self._forward_voice_event("VOICE_SERVER_UPDATE", payload)
@@ -381,6 +450,7 @@ class GuildMusicSession:
         self._channel_id = None
         self._client = None
         self.runtime.voice_channel_ids.pop(self.guild_id, None)
+        self.runtime.voice_session_ids.pop(self.guild_id, None)
         lavalink_client = self.runtime.get_lavalink_client()
         if lavalink_client:
             player = lavalink_client.player_manager.get(self.guild_id)
