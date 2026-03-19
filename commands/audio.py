@@ -1,9 +1,10 @@
 """Music-related slash commands."""
 
 import asyncio
-from typing import List
+from typing import List, Optional
 
 from interactions import OptionType, SlashContext, slash_command, slash_option
+from interactions.models import Embed
 import lavalink
 
 from command_handler import CommandHandler
@@ -20,6 +21,40 @@ def setup(handler: CommandHandler) -> None:
     get_lavalink_client = resources.get_lavalink_client
     logger = resources.logger
     MusicError = resources.music_error_cls
+
+    def _track_thumbnail(track: lavalink.AudioTrack) -> Optional[str]:
+        uri = getattr(track, "uri", "") or ""
+        identifier = getattr(track, "identifier", "") or ""
+        if identifier and ("youtube.com" in uri or "youtu.be" in uri or not uri):
+            return f"https://i.ytimg.com/vi/{identifier}/hqdefault.jpg"
+        return None
+
+    def _track_requester(track: lavalink.AudioTrack) -> Optional[int]:
+        requester = getattr(track, "requester", None)
+        if requester is not None:
+            return requester
+        extra = getattr(track, "extra", None)
+        if isinstance(extra, dict):
+            return extra.get("requester")
+        return None
+
+    def _build_track_embed(
+        *,
+        title: str,
+        description: str,
+        track: lavalink.AudioTrack,
+    ) -> Embed:
+        embed = Embed(title=title, description=description)
+        uri = getattr(track, "uri", None)
+        if uri:
+            embed.url = uri
+        thumbnail = _track_thumbnail(track)
+        if thumbnail:
+            try:
+                embed.set_thumbnail(url=thumbnail)
+            except Exception:
+                logger.debug("Unable to set thumbnail for track %s", getattr(track, "title", "unknown"))
+        return embed
 
     @slash_command(name="play", description="Queue music from YouTube or YouTube Music")
     @slash_option(
@@ -85,7 +120,11 @@ def setup(handler: CommandHandler) -> None:
 
         if result.load_type == lavalink.LoadType.PLAYLIST:
             for track in result.tracks:
-                track.extra["requester"] = ctx.author.id
+                extra = getattr(track, "extra", None)
+                if not isinstance(extra, dict):
+                    extra = {}
+                    track.extra = extra
+                extra["requester"] = ctx.author.id
                 player.add(track)
             playlist_name = result.playlist_info.name if result.playlist_info else "Playlist"
             await ctx.send(
@@ -95,10 +134,16 @@ def setup(handler: CommandHandler) -> None:
             track = result.tracks[0]
             track.requester = ctx.author.id  # type: ignore[attr-defined]
             player.add(track)
-            await ctx.send(
-                f"Queued **{track.title}** (`{format_duration(track.duration)}`) for {ctx.author.mention}\n"
-                f"<{track.uri}>"
+            embed = _build_track_embed(
+                title="Queued Track",
+                description=(
+                    f"**{track.title}**\n"
+                    f"Length: `{format_duration(track.duration)}`\n"
+                    f"Requested by {ctx.author.mention}"
+                ),
+                track=track,
             )
+            await ctx.send(embed=embed)
 
         session.cancel_idle_timer()
         if not player.is_playing:
@@ -169,17 +214,21 @@ def setup(handler: CommandHandler) -> None:
             return
         lines: List[str] = []
         if player.current:
+            requester = _track_requester(player.current)
+            requester_text = f"<@{requester}>" if requester is not None else "unknown"
             lines.append(
                 f"**Now playing:** {player.current.title} (`{format_duration(player.current.duration)}`) "
-                f"requested by <@{player.current.requester}>"
+                f"requested by {requester_text}"
             )
         if player.queue:
             lines.append("")
             lines.append("**Up next:**")
             for index, track in enumerate(player.queue[:10], start=1):
+                requester = _track_requester(track)
+                requester_text = f"<@{requester}>" if requester is not None else "unknown"
                 lines.append(
                     f"{index}. {track.title} (`{format_duration(track.duration)}`) "
-                    f"requested by <@{track.requester}>"
+                    f"requested by {requester_text}"
                 )
             remaining = len(player.queue) - 10
             if remaining > 0:
