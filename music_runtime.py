@@ -333,6 +333,10 @@ class GuildMusicSession:
 
         self._client = client
         target_id = int(channel.id)
+        lavalink_client = self.runtime.get_lavalink_client()
+        if lavalink_client:
+            player = lavalink_client.player_manager.create(self.guild_id)
+            player.channel_id = target_id
         if self._channel_id == target_id:
             return
 
@@ -357,6 +361,7 @@ class GuildMusicSession:
         if lavalink_client:
             player = lavalink_client.player_manager.get(self.guild_id)
             if player:
+                player.channel_id = None
                 try:
                     await player.stop()
                 except Exception:
