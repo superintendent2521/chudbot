@@ -89,6 +89,7 @@ def setup(handler: CommandHandler) -> None:
                 logger.warning("Unable to set player volume to %s: %s", default_volume, error)
         try:
             await session.ensure_connected(voice_channel)
+            await music_manager.wait_for_player_connection(guild_id)
         except asyncio.TimeoutError:
             lavalink_client = get_lavalink_client()
             if lavalink_client:
