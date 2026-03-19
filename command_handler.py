@@ -6,7 +6,7 @@ import importlib
 import logging
 import pkgutil
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Awaitable, Callable, Optional, Sequence, Type
 
 from interactions import Client, InteractionCommand
 from interactions.models.internal.listener import Listener
@@ -32,7 +32,7 @@ class CommandResources:
     default_player_volume: int # type: ignore
     get_voice_channel: Callable[[Member], Optional[VoiceChannel]] # type: ignore
     logger: logging.Logger # type: ignore
-    music_error_cls: type # type: ignore
+    music_error_cls: Type[Exception]
     voice_log_store: "VoiceLogStore" # type: ignore
 
 
