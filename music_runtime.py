@@ -191,11 +191,23 @@ class MusicRuntime:
                 if waiter and not waiter.done():
                     waiter.cancel()
 
-    async def _forward_voice_event(self, event_name: str, data: dict) -> None:
-        if not self.lavalink_ready() or not isinstance(data, dict):
-            return
+    @staticmethod
+    def _gateway_payload(event_name: str, data: dict) -> dict:
+        # Lavalink.py expects the raw Discord gateway payload shape, not just {"t", "d"}.
+        return {
+            "op": 0,
+            "t": event_name,
+            "s": None,
+            "d": data,
+        }
 
-        payload = {"t": event_name, "d": data}
+    async def _forward_voice_event(self, event_name: str, payload: dict) -> None:
+        if not self.lavalink_ready() or not isinstance(payload, dict):
+            return
+        data = payload.get("d") if isinstance(payload.get("d"), dict) else None
+        if not data:
+            self.logger.debug("Ignored %s because payload data was %r", event_name, payload)
+            return
 
         if event_name == "VOICE_STATE_UPDATE":
             self.logger.info(
@@ -238,7 +250,8 @@ class MusicRuntime:
             )
             return
 
-        await self._forward_voice_event("VOICE_STATE_UPDATE", data)
+        payload = self._gateway_payload("VOICE_STATE_UPDATE", dict(data))
+        await self._forward_voice_event("VOICE_STATE_UPDATE", payload)
 
     async def handle_raw_voice_server(self, event: RawGatewayEvent) -> None:
         if not self.lavalink_ready():
@@ -249,7 +262,18 @@ class MusicRuntime:
             self.logger.debug("Ignored VOICE_SERVER_UPDATE because payload was %r", event.data)
             return
 
-        await self._forward_voice_event("VOICE_SERVER_UPDATE", data)
+        missing = [key for key in ("token", "endpoint", "guild_id") if not data.get(key)]
+        if missing:
+            self.logger.warning(
+                "VOICE_SERVER_UPDATE for guild %s is missing %s: %r",
+                data.get("guild_id"),
+                ", ".join(missing),
+                data,
+            )
+            return
+
+        payload = self._gateway_payload("VOICE_SERVER_UPDATE", dict(data))
+        await self._forward_voice_event("VOICE_SERVER_UPDATE", payload)
 
     async def handle_gateway_ready(self, event: WebsocketReady) -> None:
         if not self.music_available or self.lavalink_client:
