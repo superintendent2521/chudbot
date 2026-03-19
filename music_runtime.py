@@ -44,6 +44,7 @@ class MusicRuntime:
         self.default_player_volume = default_player_volume
         self.lavalink_client: Optional[lavalink.Client] = None
         self.manager = MusicManager(self)
+        self.voice_channel_ids: Dict[int, int] = {}
 
     def get_lavalink_client(self) -> Optional[lavalink.Client]:
         return self.lavalink_client
@@ -250,6 +251,15 @@ class MusicRuntime:
             )
             return
 
+        guild_id = data.get("guild_id")
+        channel_id = data.get("channel_id")
+        if guild_id is not None:
+            guild_key = int(guild_id)
+            if channel_id is None:
+                self.voice_channel_ids.pop(guild_key, None)
+            else:
+                self.voice_channel_ids[guild_key] = int(channel_id)
+
         payload = self._gateway_payload("VOICE_STATE_UPDATE", dict(data))
         await self._forward_voice_event("VOICE_STATE_UPDATE", payload)
 
@@ -272,7 +282,20 @@ class MusicRuntime:
             )
             return
 
-        payload = self._gateway_payload("VOICE_SERVER_UPDATE", dict(data))
+        payload_data = dict(data)
+        guild_id = payload_data.get("guild_id")
+        if guild_id is not None:
+            guild_key = int(guild_id)
+            channel_id = self.voice_channel_ids.get(guild_key)
+            if channel_id is None:
+                lavalink_client = self.get_lavalink_client()
+                if lavalink_client:
+                    player = lavalink_client.player_manager.get(guild_key)
+                    channel_id = getattr(player, "channel_id", None) if player else None
+            if channel_id is not None:
+                payload_data["channel_id"] = str(channel_id)
+
+        payload = self._gateway_payload("VOICE_SERVER_UPDATE", payload_data)
         await self._forward_voice_event("VOICE_SERVER_UPDATE", payload)
 
     async def handle_gateway_ready(self, event: WebsocketReady) -> None:
@@ -357,6 +380,7 @@ class GuildMusicSession:
                 )
         self._channel_id = None
         self._client = None
+        self.runtime.voice_channel_ids.pop(self.guild_id, None)
         lavalink_client = self.runtime.get_lavalink_client()
         if lavalink_client:
             player = lavalink_client.player_manager.get(self.guild_id)
@@ -429,6 +453,20 @@ class MusicManager:
         if not client:
             raise MusicError("Music playback isn't configured.")
         return client.player_manager.create(guild_id)
+
+    async def wait_for_player_connection(self, guild_id: int) -> None:
+        client = self.runtime.get_lavalink_client()
+        if not client:
+            raise MusicError("Music playback isn't configured.")
+
+        player = client.player_manager.create(guild_id)
+        deadline = asyncio.get_running_loop().time() + self.runtime.voice_connect_timeout
+        while asyncio.get_running_loop().time() < deadline:
+            if bool(getattr(player, "is_connected", False)):
+                return
+            await asyncio.sleep(0.25)
+
+        raise MusicError("I joined voice chat, but Lavalink never finished connecting to Discord voice.")
 
     async def load_tracks(self, query: str) -> lavalink.LoadResult:
         client = self.runtime.get_lavalink_client()
