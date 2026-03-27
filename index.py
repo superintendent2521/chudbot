@@ -4,7 +4,6 @@ import os
 from dotenv import load_dotenv
 from interactions import Client, Intents
 
-from ai_chat import AiChatService
 from command_handler import CommandHandler, CommandResources
 from music_runtime import MusicError, MusicRuntime
 from reaction_roles import (
@@ -50,17 +49,6 @@ if LOG_CHANNEL_ID_RAW:
 GEM_CHANNEL_ID = 1447398899588530196
 MESSAGE_DELETE_LOG_CHANNEL_ID = 1_470_612_259_721_052_300
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL", "")
-OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "Chuds Discord Bot")
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-AI_MODEL_ID = "z-ai/glm-4.5-air:free"
-SYSTEM_PROMPT = (
-    "You are a bot that is replicating jessie pinkman from the show breaking bad, talk like him, use his slang and mannerisms. if you dont know an answer, say a joke as a response, you must use yo in every sentence, yo"
-    "Keep answers concise when possible and follow Discord formatting rules."
-)
-MAX_MEMORY_MESSAGES = 20
-
 MUSIC_DJ_ROLE_ID_RAW = os.getenv("MUSIC_DJ_ROLE_ID")
 MUSIC_DJ_ROLE_ID = None
 if MUSIC_DJ_ROLE_ID_RAW:
@@ -82,8 +70,6 @@ except ValueError:
     logger.warning("LAVALINK_PORT must be numeric, got %s", LAVALINK_PORT_RAW)
 MUSIC_AVAILABLE = all([LAVALINK_HOST, LAVALINK_PORT, LAVALINK_PASSWORD])
 
-if not OPENROUTER_API_KEY:
-    logger.warning("OPENROUTER_API_KEY not set. AI chat feature disabled.")
 if not MUSIC_AVAILABLE:
     logger.warning("Lavalink connection info missing. Music commands are disabled.")
 
@@ -110,17 +96,6 @@ music_runtime = MusicRuntime(
     voice_connect_timeout=VOICE_CONNECT_TIMEOUT,
     default_player_volume=DEFAULT_PLAYER_VOLUME,
 )
-ai_service = AiChatService(
-    logger=logger,
-    openrouter_api_url=OPENROUTER_API_URL,
-    openrouter_api_key=OPENROUTER_API_KEY,
-    openrouter_site_url=OPENROUTER_SITE_URL,
-    openrouter_app_name=OPENROUTER_APP_NAME,
-    system_prompt=SYSTEM_PROMPT,
-    model_id=AI_MODEL_ID,
-    max_memory_messages=MAX_MEMORY_MESSAGES,
-)
-
 bot = Client(
     token=BOT_TOKEN,
     intents=Intents.DEFAULT
@@ -168,7 +143,6 @@ for listener in create_fixupx_listener(logger):
     bot.add_listener(listener)
 for listener in create_message_delete_logging_listeners(MESSAGE_DELETE_LOG_CHANNEL_ID, logger):
     bot.add_listener(listener)
-bot.add_listener(ai_service.create_listener())
 
 logger.info("Environment: %s", ENVIRONMENT)
 bot.start()

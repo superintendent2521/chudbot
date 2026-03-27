@@ -32,7 +32,7 @@ def setup(handler: CommandHandler) -> None:
     )
     @slash_default_member_permission(Permissions.BAN_MEMBERS)
     async def ban_user(ctx: SlashContext, user: Member):
-        if user.id == ctx.guild.me.id:
+        if user.id == ctx.guild.me.id: # pyright: ignore[reportOptionalMemberAccess]
             await ctx.send(":x: You cannot ban me!")
             return
 
@@ -56,7 +56,7 @@ def setup(handler: CommandHandler) -> None:
     async def unban_user(ctx: SlashContext, user: Member):
         try:
             reason = f"Unbanned by {ctx.author.display_name}"
-            await ctx.guild.unban(user, reason=reason)
+            await ctx.guild.unban(user, reason=reason) # type: ignore
             await ctx.send(f":white_check_mark: Unbanned {user.mention}.")
         except Exception as exc:
             await ctx.send(f":x: Failed to unban {user.mention}: {exc}")
@@ -122,7 +122,7 @@ def setup(handler: CommandHandler) -> None:
     )
     @slash_default_member_permission(Permissions.MODERATE_MEMBERS)
     async def mute_user(ctx: SlashContext, user: Member, duration: int, reason: str = ""):
-        if user.id == ctx.guild.me.id:
+        if user.id == ctx.guild.me.id: # type: ignore
             await ctx.send(":x: I cannot mute myself.")
             return
 
@@ -156,7 +156,7 @@ def setup(handler: CommandHandler) -> None:
     )
     @slash_default_member_permission(Permissions.MODERATE_MEMBERS)
     async def unmute_user(ctx: SlashContext, user: Member, reason: str = ""):
-        if user.id == ctx.guild.me.id:
+        if user.id == ctx.guild.me.id: # type: ignore
             await ctx.send(":x: I cannot unmute myself.")
             return
 
