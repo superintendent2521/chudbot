@@ -36,6 +36,8 @@ class CommandResources:
     voice_log_store: "VoiceLogStore" # type: ignore
     gem_board_store: "GuildChannelStore" # type: ignore
     audit_log_store: "GuildChannelStore" # type: ignore
+    ban_log_store: "GuildChannelStore" # type: ignore
+    faq_store: "FAQStore" # type: ignore
 
 
 class CommandHandler:

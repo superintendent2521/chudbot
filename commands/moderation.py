@@ -1,14 +1,16 @@
-﻿"""Discord moderation commands."""
+"""Discord moderation commands."""
 
 from datetime import datetime, timedelta
 
 from interactions import OptionType, slash_option, slash_default_member_permission, Member, SlashContext, slash_command
+from interactions.models import Embed
 from interactions.models.discord.enums import Permissions
 
 from command_handler import CommandHandler
 from warn import add_warn, get_warns
 
 MAX_TIMEOUT_MINUTES = 28 * 24 * 60  # Discord hard limit for timeouts (28 days)
+BAN_LOG_COLOR = 0xCC3B3B
 
 
 def _clamp_timeout(minutes: int) -> int:
@@ -22,7 +24,25 @@ def _format_warns(warns: list[str]) -> str:
     return "\n".join(f"{idx + 1}. {text}" for idx, text in enumerate(warns))
 
 
+async def _get_sendable_channel(client, channel_id: int, logger):
+    channel = client.cache.get_channel(channel_id)
+    if not channel:
+        try:
+            channel = await client.fetch_channel(channel_id)
+        except Exception as error:
+            logger.warning("Unable to fetch channel %s for ban log: %s", channel_id, error)
+            return None
+    if not getattr(channel, "send", None):
+        logger.warning("Channel %s does not allow sending messages for ban logs", channel_id)
+        return None
+    return channel
+
+
 def setup(handler: CommandHandler) -> None:
+    resources = handler.resources
+    ban_log_store = resources.ban_log_store
+    logger = resources.logger
+
     @slash_command(name="ban", description="Ban a user from the server.")
     @slash_option(
         name="user",
@@ -30,16 +50,39 @@ def setup(handler: CommandHandler) -> None:
         required=True,
         opt_type=OptionType.USER,
     )
+    @slash_option(
+        name="reason",
+        description="Reason for the ban.",
+        required=True,
+        opt_type=OptionType.STRING,
+    )
     @slash_default_member_permission(Permissions.BAN_MEMBERS)
-    async def ban_user(ctx: SlashContext, user: Member):
+    async def ban_user(ctx: SlashContext, user: Member, reason: str):
         if user.id == ctx.guild.me.id: # pyright: ignore[reportOptionalMemberAccess]
             await ctx.send(":x: You cannot ban me!")
             return
 
         try:
-            reason = f"Banned by {ctx.author.display_name}"
             await user.ban(reason=reason)
-            await ctx.send(f":white_check_mark: Banned {user.mention}.")
+            await ctx.send(f":white_check_mark: Banned {user.mention} for `{reason}`.")
+
+            log_channel_id = ban_log_store.get_channel_id(int(ctx.guild_id)) if ctx.guild_id else None
+            log_channel = None
+            if log_channel_id:
+                log_channel = await _get_sendable_channel(ctx.client, log_channel_id, logger)
+            if log_channel is None and ctx.channel and getattr(ctx.channel, "send", None):
+                log_channel = ctx.channel
+
+            if log_channel is not None:
+                embed = Embed(
+                    title="User Banned",
+                    color=BAN_LOG_COLOR,
+                    description=f"{user.mention} was banned.",
+                )
+                embed.add_field("Moderator", getattr(ctx.author, "mention", ctx.author.display_name), inline=True)
+                embed.add_field("User ID", str(user.id), inline=True)
+                embed.add_field("Reason", reason, inline=False)
+                await log_channel.send(embed=embed)
         except Exception as exc:
             await ctx.send(f":x: Failed to ban {user.mention}: {exc}")
 

@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 from interactions import Client, Intents
 
 from command_handler import CommandHandler, CommandResources
+from faq_store import FAQStore
+from github_channel_guard import create_github_channel_guard
 from guild_channel_store import GuildChannelStore
 from music_runtime import MusicError, MusicRuntime
 from reaction_roles import (
@@ -16,7 +18,6 @@ from reaction_roles import (
 from voice_logging import VoiceLogStore, create_voice_logging_listeners
 from member_join_handler import create_member_join_listeners
 from gem_reactions import create_gem_reaction_listeners
-from fixupx_link_listener import create_fixupx_listener
 from message_delete_logging import create_message_delete_logging_listeners
 
 load_dotenv()
@@ -33,6 +34,8 @@ REACTION_ROLE_DATA_FILE = os.path.join(BASE_DIR, "reaction_roles.json")
 VOICE_LOG_DATA_FILE = os.path.join(BASE_DIR, "voice_log_channels.json")
 GEM_BOARD_DATA_FILE = os.path.join(BASE_DIR, "gem_board_channels.json")
 AUDIT_LOG_DATA_FILE = os.path.join(BASE_DIR, "audit_log_channels.json")
+BAN_LOG_DATA_FILE = os.path.join(BASE_DIR, "ban_log_channels.json")
+FAQ_DATA_FILE = os.path.join(BASE_DIR, "faq_entries.json")
 
 ENVIRONMENT = "main"  # or 'dev'
 BOT_TOKEN = os.getenv(f"BOT_TOKEN_{ENVIRONMENT.upper()}")
@@ -72,6 +75,8 @@ voice_log_store = VoiceLogStore(
 )
 gem_board_store = GuildChannelStore(GEM_BOARD_DATA_FILE, logger)
 audit_log_store = GuildChannelStore(AUDIT_LOG_DATA_FILE, logger)
+ban_log_store = GuildChannelStore(BAN_LOG_DATA_FILE, logger)
+faq_store = FAQStore(FAQ_DATA_FILE, logger)
 music_runtime = MusicRuntime(
     logger=logger,
     lavalink_host=LAVALINK_HOST,
@@ -116,6 +121,8 @@ command_resources = CommandResources(
     voice_log_store=voice_log_store,
     gem_board_store=gem_board_store,
     audit_log_store=audit_log_store,
+    ban_log_store=ban_log_store,
+    faq_store=faq_store,
 )
 command_handler = CommandHandler(bot, command_resources)
 command_handler.load_from_package("commands")
@@ -130,9 +137,9 @@ for listener in create_member_join_listeners(logger):
     bot.add_listener(listener)
 for listener in create_gem_reaction_listeners(gem_board_store, logger):
     bot.add_listener(listener)
-for listener in create_fixupx_listener(logger):
-    bot.add_listener(listener)
 for listener in create_message_delete_logging_listeners(audit_log_store, logger):
+    bot.add_listener(listener)
+for listener in create_github_channel_guard(logger):
     bot.add_listener(listener)
 
 logger.info("Environment: %s", ENVIRONMENT)

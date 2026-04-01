@@ -2,3 +2,4 @@
 __pycache__/
 *.pyc
 reaction_roles.json
+.codex
