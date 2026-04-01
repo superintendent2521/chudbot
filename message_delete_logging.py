@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Tuple
+from typing import Optional, Tuple
 
 from interactions import listen
 from interactions.api.events.discord import MessageDelete
+
+from guild_channel_store import GuildChannelStore
 
 
 async def _get_sendable_channel(client, channel_id: int, logger: logging.Logger):
@@ -35,13 +37,54 @@ def _truncate(text: str, limit: int = 1500) -> str:
     return text[: limit - 3] + "..."
 
 
+def _snowflake_to_int(value) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    candidate = getattr(value, "id", None)
+    if candidate is not None:
+        try:
+            return int(candidate)
+        except (TypeError, ValueError):
+            return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_guild_id_from_delete_event(event: MessageDelete) -> Optional[int]:
+    deleted_message = getattr(event, "message", None)
+    for candidate in (
+        getattr(event, "guild_id", None),
+        getattr(getattr(deleted_message, "guild", None), "id", None),
+        getattr(deleted_message, "_guild_id", None),
+        getattr(getattr(deleted_message, "channel", None), "guild_id", None),
+        getattr(getattr(getattr(deleted_message, "channel", None), "guild", None), "id", None),
+    ):
+        guild_id = _snowflake_to_int(candidate)
+        if guild_id:
+            return guild_id
+    return None
+
+
 def create_message_delete_logging_listeners(
-    log_channel_id: int, logger: logging.Logger
+    store: GuildChannelStore, logger: logging.Logger
 ) -> Tuple:
     """Create listeners that log deleted messages to the audit channel."""
 
     @listen(MessageDelete)
     async def on_message_delete(event: MessageDelete):
+        guild_id = _get_guild_id_from_delete_event(event)
+        if not guild_id:
+            logger.debug("Skipping message delete log with no guild id")
+            return
+
+        log_channel_id = store.get_channel_id(guild_id)
+        if not log_channel_id:
+            return
+
         channel = await _get_sendable_channel(event.client, log_channel_id, logger)
         if not channel:
             logger.warning(

@@ -8,6 +8,7 @@ from typing import Optional, Set, Tuple
 from interactions import Member, listen
 from interactions.api.events.discord import MessageReactionAdd
 from interactions.models import Embed
+from guild_channel_store import GuildChannelStore
 from reaction_roles import member_has_role, snowflake_to_int
 
 
@@ -17,6 +18,24 @@ GEM_CURATOR_ROLE_ID = 1_434_633_532_436_648_126
 
 # Track which messages we've already posted to avoid duplicates
 posted_messages: Set[int] = set()
+
+
+async def _get_sendable_channel(client, channel_id: int, logger: logging.Logger):
+    channel = client.cache.get_channel(channel_id)
+    if not channel:
+        try:
+            channel = await client.fetch_channel(channel_id)
+        except Exception as error:
+            logger.warning("Unable to fetch gem board channel %s: %s", channel_id, error)
+            return None
+    if not getattr(channel, "send", None):
+        logger.warning(
+            "Gem board channel %s (%s) does not allow sending messages",
+            channel_id,
+            channel.__class__.__name__,
+        )
+        return None
+    return channel
 
 
 async def _get_member_from_reaction_event(
@@ -57,18 +76,8 @@ async def _get_member_from_reaction_event(
         return None
 
 
-def create_gem_reaction_listeners(
-    gem_channel_id: int, logger: logging.Logger
-) -> Tuple:
-    """Create listeners for gem reactions.
-    
-    Args:
-        gem_channel_id: ID of the channel to send gem messages to
-        logger: Logger instance for logging events
-        
-    Returns:
-        Tuple of listener functions
-    """
+def create_gem_reaction_listeners(store: GuildChannelStore, logger: logging.Logger) -> Tuple:
+    """Create listeners for gem reactions using per-guild channel config."""
 
     @listen(MessageReactionAdd)
     async def on_gem_reaction(event: MessageReactionAdd):
@@ -134,44 +143,43 @@ def create_gem_reaction_listeners(
             if force_post and gem_count < GEM_THRESHOLD:
                 gem_count = max(gem_count, 1)
 
-            # Get author info
-            author = getattr(message, "author", None)
-            username = getattr(author, "username", "Unknown") if author else "Unknown"
-            
-            # FIXED: Get message content - Extract and include original message content
-            message_content = getattr(message, "content", "") or ""
-            if not message_content and hasattr(message, "embeds") and message.embeds:
-                # Try to get content from embeds if no regular content
-                for embed in message.embeds:
-                    if hasattr(embed, "description") and embed.description:
-                        message_content = embed.description[:1000]  # Limit length
-                        break
-            
-            # FIXED: Get guild ID and channel ID using the same pattern as reaction_roles.py
             guild_id = None
             if message is not None:
-                # Try to get guild from message.guild first
                 guild = getattr(message, "guild", None)
                 if guild is not None:
                     guild_id = int(getattr(guild, "id", guild))
-                # Fallback: try message._guild_id
                 if guild_id is None:
                     guild_id = getattr(message, "_guild_id", None)
-            # Final fallback: try event.guild_id
             if guild_id is None:
                 guild_id = getattr(event, "guild_id", None)
-            
-            # Get channel ID - similar approach
+
+            guild_id = snowflake_to_int(guild_id)
+            if guild_id is None:
+                logger.warning("Skipping gem board post for message %s with no guild id", message.id)
+                return
+
+            gem_channel_id = store.get_channel_id(guild_id)
+            if not gem_channel_id:
+                return
+
+            # Get author info
+            author = getattr(message, "author", None)
+            username = getattr(author, "username", "Unknown") if author else "Unknown"
+
+            message_content = getattr(message, "content", "") or ""
+            if not message_content and hasattr(message, "embeds") and message.embeds:
+                for embed in message.embeds:
+                    if hasattr(embed, "description") and embed.description:
+                        message_content = embed.description[:1000]
+                        break
+
             channel_id = None
             if message is not None:
                 channel = getattr(message, "channel", None)
                 if channel is not None:
                     channel_id = int(getattr(channel, "id", channel))
-            
-            # Log the results for debugging
-            logger.info(f"Extracted IDs - Guild: {guild_id}, Channel: {channel_id}, Message: {message.id}")
 
-            # Create embed with message content - FIXED: Include original message content
+            logger.info(f"Extracted IDs - Guild: {guild_id}, Channel: {channel_id}, Message: {message.id}")
             base_description = f"Got {gem_count} :gem: reactions"
             if force_post:
                 base_description += "\nFeatured early by curator reaction."
@@ -184,7 +192,6 @@ def create_gem_reaction_listeners(
 
             description_text = embed.description or ""
 
-            # FIXED: Create proper Discord jump link with proper IDs
             if guild_id and channel_id and message.id:
                 try:
                     jump_url = f"https://discord.com/channels/{int(guild_id)}/{int(channel_id)}/{int(message.id)}"
@@ -224,12 +231,10 @@ def create_gem_reaction_listeners(
                     except Exception:
                         continue
 
-            # Send to gem channel
             try:
-                gem_channel = await event.client.fetch_channel(gem_channel_id)
-                send = getattr(gem_channel, "send", None) if gem_channel else None
-                if send:
-                    await send(embed=embed)
+                gem_channel = await _get_sendable_channel(event.client, gem_channel_id, logger)
+                if gem_channel:
+                    await gem_channel.send(embed=embed)
                     posted_messages.add(message.id)
                     logger.info(
                         "Posted message %s to gem channel. Author: %s, Gem count: %d",

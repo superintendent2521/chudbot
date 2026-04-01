@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from interactions import Client, Intents
 
 from command_handler import CommandHandler, CommandResources
+from guild_channel_store import GuildChannelStore
 from music_runtime import MusicError, MusicRuntime
 from reaction_roles import (
     ReactionRoleStore,
@@ -30,24 +31,11 @@ DEFAULT_REACTION_ROLE_EMOJI = "🥀"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 REACTION_ROLE_DATA_FILE = os.path.join(BASE_DIR, "reaction_roles.json")
 VOICE_LOG_DATA_FILE = os.path.join(BASE_DIR, "voice_log_channels.json")
+GEM_BOARD_DATA_FILE = os.path.join(BASE_DIR, "gem_board_channels.json")
+AUDIT_LOG_DATA_FILE = os.path.join(BASE_DIR, "audit_log_channels.json")
 
 ENVIRONMENT = "main"  # or 'dev'
 BOT_TOKEN = os.getenv(f"BOT_TOKEN_{ENVIRONMENT.upper()}")
-
-LOG_CHANNEL_ID_RAW = os.getenv("LOG_CHANNEL_ID")
-LOG_CHANNEL_ID = None
-if LOG_CHANNEL_ID_RAW:
-    LOG_CHANNEL_ID_SANITIZED = "".join(ch for ch in LOG_CHANNEL_ID_RAW if ch.isdigit())
-    if not LOG_CHANNEL_ID_SANITIZED:
-        logger.warning("LOG_CHANNEL_ID must contain digits, got %r", LOG_CHANNEL_ID_RAW)
-    else:
-        try:
-            LOG_CHANNEL_ID = int(LOG_CHANNEL_ID_SANITIZED)
-        except ValueError:
-            logger.warning("LOG_CHANNEL_ID must be numeric, got %r", LOG_CHANNEL_ID_RAW)
-
-GEM_CHANNEL_ID = 1447398899588530196
-MESSAGE_DELETE_LOG_CHANNEL_ID = 1_470_612_259_721_052_300
 
 MUSIC_DJ_ROLE_ID_RAW = os.getenv("MUSIC_DJ_ROLE_ID")
 MUSIC_DJ_ROLE_ID = None
@@ -81,8 +69,9 @@ reaction_role_store = ReactionRoleStore(
 voice_log_store = VoiceLogStore(
     VOICE_LOG_DATA_FILE,
     logger,
-    default_channel_id=LOG_CHANNEL_ID,
 )
+gem_board_store = GuildChannelStore(GEM_BOARD_DATA_FILE, logger)
+audit_log_store = GuildChannelStore(AUDIT_LOG_DATA_FILE, logger)
 music_runtime = MusicRuntime(
     logger=logger,
     lavalink_host=LAVALINK_HOST,
@@ -125,6 +114,8 @@ command_resources = CommandResources(
     logger=logger,
     music_error_cls=MusicError,
     voice_log_store=voice_log_store,
+    gem_board_store=gem_board_store,
+    audit_log_store=audit_log_store,
 )
 command_handler = CommandHandler(bot, command_resources)
 command_handler.load_from_package("commands")
@@ -137,11 +128,11 @@ for listener in create_voice_logging_listeners(voice_log_store, logger):
     bot.add_listener(listener)
 for listener in create_member_join_listeners(logger):
     bot.add_listener(listener)
-for listener in create_gem_reaction_listeners(GEM_CHANNEL_ID, logger):
+for listener in create_gem_reaction_listeners(gem_board_store, logger):
     bot.add_listener(listener)
 for listener in create_fixupx_listener(logger):
     bot.add_listener(listener)
-for listener in create_message_delete_logging_listeners(MESSAGE_DELETE_LOG_CHANNEL_ID, logger):
+for listener in create_message_delete_logging_listeners(audit_log_store, logger):
     bot.add_listener(listener)
 
 logger.info("Environment: %s", ENVIRONMENT)
