@@ -43,6 +43,8 @@ class MusicRuntime:
         self.voice_connect_timeout = voice_connect_timeout
         self.default_player_volume = default_player_volume
         self.lavalink_client: Optional[lavalink.Client] = None
+        self._lavalink_user_id: Optional[int] = None
+        self._lavalink_reconnect_lock = asyncio.Lock()
         self.manager = MusicManager(self)
         self.voice_channel_ids: Dict[int, int] = {}
         self.voice_session_ids: Dict[int, str] = {}
@@ -52,6 +54,77 @@ class MusicRuntime:
 
     def lavalink_ready(self) -> bool:
         return self.music_available and self.lavalink_client is not None
+
+    @staticmethod
+    def _is_no_available_nodes_error(error: Exception) -> bool:
+        return isinstance(error, lavalink.errors.ClientError) and "No available nodes" in str(error)
+
+    async def _close_lavalink_client(self, client: Optional[lavalink.Client]) -> None:
+        if client is None:
+            return
+
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                result = close()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as error:
+                self.logger.warning("Failed to close Lavalink client cleanly: %s", error)
+
+    def _create_lavalink_client(self, user_id: int) -> lavalink.Client:
+        client = lavalink.Client(user_id)
+        port = self.lavalink_port if self.lavalink_port is not None else 2333
+        client.add_node(
+            host=self.lavalink_host,
+            port=port,
+            password=self.lavalink_password,
+            region=self.lavalink_region,
+            ssl=self.lavalink_ssl,
+        )
+        client.add_event_hooks(LavalinkEvents(self.manager))
+        return client
+
+    async def connect_lavalink(self, user_id: int) -> bool:
+        if not self.music_available:
+            return False
+
+        self._lavalink_user_id = user_id
+        async with self._lavalink_reconnect_lock:
+            if self.lavalink_client is not None:
+                return True
+
+            try:
+                self.lavalink_client = self._create_lavalink_client(user_id)
+                self.logger.info("Connected to Lavalink node at %s:%s", self.lavalink_host, self.lavalink_port)
+                return True
+            except Exception as error:
+                self.lavalink_client = None
+                self.logger.error("Failed to connect to Lavalink: %s", error)
+                return False
+
+    async def reconnect_lavalink(self, *, reason: str) -> bool:
+        if not self.music_available or self._lavalink_user_id is None:
+            return False
+
+        async with self._lavalink_reconnect_lock:
+            old_client = self.lavalink_client
+            self.lavalink_client = None
+            await self._close_lavalink_client(old_client)
+
+            try:
+                self.lavalink_client = self._create_lavalink_client(self._lavalink_user_id)
+                self.logger.warning(
+                    "Reconnected to Lavalink node at %s:%s after %s",
+                    self.lavalink_host,
+                    self.lavalink_port,
+                    reason,
+                )
+                return True
+            except Exception as error:
+                self.lavalink_client = None
+                self.logger.error("Failed to reconnect to Lavalink after %s: %s", reason, error)
+                return False
 
     async def require_lavalink(self, ctx: SlashContext) -> bool:
         if self.lavalink_ready():
@@ -370,21 +443,9 @@ class MusicRuntime:
     async def handle_gateway_ready(self, event: WebsocketReady) -> None:
         if not self.music_available or self.lavalink_client:
             return
-        try:
-            self.lavalink_client = lavalink.Client(event.client.user.id)
-            port = self.lavalink_port if self.lavalink_port is not None else 2333
-            self.lavalink_client.add_node(
-                host=self.lavalink_host,
-                port=port,
-                password=self.lavalink_password,
-                region=self.lavalink_region,
-                ssl=self.lavalink_ssl,
-            )
-            self.lavalink_client.add_event_hooks(LavalinkEvents(self.manager))
-            self.logger.info("Connected to Lavalink node at %s:%s", self.lavalink_host, self.lavalink_port)
-        except Exception as error:
-            self.lavalink_client = None
-            self.logger.error("Failed to connect to Lavalink: %s", error)
+        if not event.client.user:
+            return
+        await self.connect_lavalink(event.client.user.id)
 
     def create_gateway_listeners(self) -> Tuple:
         runtime = self
@@ -426,15 +487,32 @@ class GuildMusicSession:
         self._client = client
         target_id = int(channel.id)
         lavalink_client = self.runtime.get_lavalink_client()
+        player = None
         if lavalink_client:
             player = lavalink_client.player_manager.create(self.guild_id)
             player.channel_id = target_id
-        if self._channel_id == target_id:
+        if self._channel_id == target_id and bool(getattr(player, "is_connected", False)):
             return
 
         self.runtime.logger.info("Requesting voice connection to channel %s in guild %s", target_id, self.guild_id)
         await self.runtime.issue_voice_state_update(client, self.guild_id, target_id, deafened=False)
         self._channel_id = target_id
+
+    async def reconnect_voice_state(self) -> None:
+        if not self._client or self._channel_id is None:
+            return
+
+        self.runtime.logger.warning(
+            "Refreshing voice connection for guild %s after Lavalink reconnect",
+            self.guild_id,
+        )
+        await self.runtime.issue_voice_state_update(self._client, self.guild_id, None, deafened=False)
+        await self.runtime.issue_voice_state_update(
+            self._client,
+            self.guild_id,
+            self._channel_id,
+            deafened=False,
+        )
 
     async def disconnect(self) -> None:
         self.cancel_idle_timer()
@@ -538,7 +616,7 @@ class MusicManager:
 
         raise MusicError("I joined voice chat, but Lavalink never finished connecting to Discord voice.")
 
-    async def load_tracks(self, query: str) -> lavalink.LoadResult:
+    async def load_tracks(self, query: str, guild_id: Optional[int] = None) -> lavalink.LoadResult:
         client = self.runtime.get_lavalink_client()
         if not client:
             raise MusicError("Music playback isn't configured.")
@@ -547,7 +625,38 @@ class MusicManager:
             raise MusicError("Please provide a search term or link.")
         if not normalized.startswith(("http://", "https://")):
             normalized = f"ytsearch:{normalized}"
-        result = await client.get_tracks(normalized)
+        try:
+            result = await client.get_tracks(normalized)
+        except lavalink.errors.ClientError as error:
+            if not self.runtime._is_no_available_nodes_error(error):
+                raise
+
+            self.runtime.logger.warning("Lavalink reported no available nodes while loading tracks: %s", error)
+            reconnected = await self.runtime.reconnect_lavalink(reason="no available nodes during track load")
+            if not reconnected:
+                raise MusicError("Lavalink is unavailable right now. Try again in a moment.")
+
+            if guild_id is not None:
+                session = self.sessions.get(guild_id)
+                if session:
+                    try:
+                        await session.reconnect_voice_state()
+                    except Exception as reconnect_error:
+                        self.runtime.logger.warning(
+                            "Failed to refresh voice state for guild %s after Lavalink reconnect: %s",
+                            guild_id,
+                            reconnect_error,
+                        )
+
+            client = self.runtime.get_lavalink_client()
+            if not client:
+                raise MusicError("Lavalink is unavailable right now. Try again in a moment.")
+            try:
+                result = await client.get_tracks(normalized)
+            except lavalink.errors.ClientError as retry_error:
+                if self.runtime._is_no_available_nodes_error(retry_error):
+                    raise MusicError("Lavalink is unavailable right now. Try again in a moment.")
+                raise
         if result.load_type == lavalink.LoadType.ERROR:
             raise MusicError(f"Lavalink error: {result.error}")
         if result.load_type == lavalink.LoadType.EMPTY or not result.tracks:

@@ -112,7 +112,7 @@ def setup(handler: CommandHandler) -> None:
             return
 
         try:
-            result = await music_manager.load_tracks(query)
+            result = await music_manager.load_tracks(query, guild_id=guild_id)
         except MusicError as error:
             await ctx.send(f"I couldn't load that track: {error}", ephemeral=True)
             return
