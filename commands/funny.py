@@ -16,7 +16,7 @@ TEXT_TRIGGERS = {
 def setup(handler: CommandHandler) -> None:
     @slash_command(name="whencassini", description="Get the official Cassini ETA.")
     async def when_cassini_command(ctx: SlashContext):
-        await ctx.send("never")
+        await ctx.send("We don't have an internal timeline or release date, We believe in a 'it's ready when its ready approach'")
 
     @slash_command(name="cassinifact", description="Receive an important Cassini fact.")
     async def cassini_fact_command(ctx: SlashContext):
@@ -24,7 +24,7 @@ def setup(handler: CommandHandler) -> None:
 
     @slash_command(name="areweback", description="Check whether things are back.")
     async def are_we_back_command(ctx: SlashContext):
-        await ctx.send("no")
+        await ctx.send("we were never gone!")
 
     @listen(MessageCreate)
     async def on_funny_trigger(event: MessageCreate):
