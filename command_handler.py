@@ -35,6 +35,7 @@ class CommandResources:
     music_error_cls: Type[Exception]
     voice_log_store: "VoiceLogStore" # type: ignore
     gem_board_store: "GuildChannelStore" # type: ignore
+    coal_board_store: "GuildChannelStore" # type: ignore
     audit_log_store: "GuildChannelStore" # type: ignore
 
 
