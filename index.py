@@ -16,6 +16,7 @@ from reaction_roles import (
 from voice_logging import VoiceLogStore, create_voice_logging_listeners
 from member_join_handler import create_member_join_listeners
 from gem_reactions import create_gem_reaction_listeners
+from coal_reactions import create_coal_reaction_listeners
 from fixupx_link_listener import create_fixupx_listener
 from message_delete_logging import create_message_delete_logging_listeners
 
@@ -32,6 +33,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 REACTION_ROLE_DATA_FILE = os.path.join(BASE_DIR, "reaction_roles.json")
 VOICE_LOG_DATA_FILE = os.path.join(BASE_DIR, "voice_log_channels.json")
 GEM_BOARD_DATA_FILE = os.path.join(BASE_DIR, "gem_board_channels.json")
+COAL_BOARD_DATA_FILE = os.path.join(BASE_DIR, "coal_board_channels.json")
 AUDIT_LOG_DATA_FILE = os.path.join(BASE_DIR, "audit_log_channels.json")
 
 ENVIRONMENT = "main"  # or 'dev'
@@ -71,6 +73,7 @@ voice_log_store = VoiceLogStore(
     logger,
 )
 gem_board_store = GuildChannelStore(GEM_BOARD_DATA_FILE, logger)
+coal_board_store = GuildChannelStore(COAL_BOARD_DATA_FILE, logger)
 audit_log_store = GuildChannelStore(AUDIT_LOG_DATA_FILE, logger)
 music_runtime = MusicRuntime(
     logger=logger,
@@ -115,6 +118,7 @@ command_resources = CommandResources(
     music_error_cls=MusicError,
     voice_log_store=voice_log_store,
     gem_board_store=gem_board_store,
+    coal_board_store=coal_board_store,
     audit_log_store=audit_log_store,
 )
 command_handler = CommandHandler(bot, command_resources)
@@ -129,6 +133,8 @@ for listener in create_voice_logging_listeners(voice_log_store, logger):
 for listener in create_member_join_listeners(logger):
     bot.add_listener(listener)
 for listener in create_gem_reaction_listeners(gem_board_store, logger):
+    bot.add_listener(listener)
+for listener in create_coal_reaction_listeners(coal_board_store, REACTION_ROLE_ADMIN_ROLE_ID, logger):
     bot.add_listener(listener)
 for listener in create_fixupx_listener(logger):
     bot.add_listener(listener)
