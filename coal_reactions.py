@@ -13,7 +13,8 @@ from guild_channel_store import GuildChannelStore
 from reaction_roles import member_has_role, snowflake_to_int
 
 
-COAL_EMOJI = "🪨"
+COAL_EMOJI = "Coal"
+COAL_EMOJI_ID = 1_457_140_176_072_741_040
 COAL_THRESHOLD = 2
 
 # Track which messages we've already posted to avoid duplicates
@@ -38,6 +39,16 @@ async def _get_sendable_channel(client, channel_id: int, logger: logging.Logger)
     return channel
 
 
+def _is_coal_emoji(emoji) -> bool:
+    emoji_name = getattr(emoji, "name", str(emoji))
+    emoji_id = snowflake_to_int(getattr(emoji, "id", None))
+    return (
+        emoji_name == COAL_EMOJI
+        or str(emoji) == COAL_EMOJI
+        or emoji_id == COAL_EMOJI_ID
+    )
+
+
 def create_coal_reaction_listeners(
     store: GuildChannelStore,
     admin_role_id: int,
@@ -53,8 +64,7 @@ def create_coal_reaction_listeners(
                 return
 
             emoji = event.emoji
-            emoji_name = getattr(emoji, "name", str(emoji))
-            if emoji_name != COAL_EMOJI and str(emoji) != COAL_EMOJI:
+            if not _is_coal_emoji(emoji):
                 return
 
             if message.id in posted_messages:
@@ -67,8 +77,7 @@ def create_coal_reaction_listeners(
             if hasattr(message, "reactions") and message.reactions:
                 for reaction in message.reactions:
                     try:
-                        reaction_emoji_name = getattr(reaction.emoji, "name", str(reaction.emoji))
-                        if reaction_emoji_name == COAL_EMOJI or str(reaction.emoji) == COAL_EMOJI:
+                        if _is_coal_emoji(reaction.emoji):
                             coal_count = reaction.count if hasattr(reaction, "count") else 1
                             break
                     except Exception:
