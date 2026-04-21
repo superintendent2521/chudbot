@@ -47,6 +47,8 @@ class MusicRuntime:
         self._lavalink_reconnect_lock = asyncio.Lock()
         self._no_nodes_retry_count = 0
         self._no_nodes_retry_after = 0.0
+        self._node_disconnect_retry_count = 0
+        self._node_reconnect_task: Optional[asyncio.Task] = None
         self.manager = MusicManager(self)
         self.voice_channel_ids: Dict[int, int] = {}
         self.voice_session_ids: Dict[int, str] = {}
@@ -76,6 +78,46 @@ class MusicRuntime:
 
     def _remaining_no_nodes_backoff(self) -> float:
         return max(0.0, self._no_nodes_retry_after - asyncio.get_running_loop().time())
+
+    def _record_node_disconnect_failure(self) -> float:
+        self._node_disconnect_retry_count += 1
+        return min(60.0, float(5 * (2 ** min(self._node_disconnect_retry_count - 1, 4))))
+
+    def _reset_node_disconnect_backoff(self) -> None:
+        self._node_disconnect_retry_count = 0
+
+    async def _rebind_voice_sessions(self) -> None:
+        for guild_id, session in list(self.manager.sessions.items()):
+            try:
+                await session.reconnect_voice_state()
+            except Exception as error:
+                self.logger.warning(
+                    "Failed to refresh voice state for guild %s after Lavalink reconnect: %s",
+                    guild_id,
+                    error,
+                )
+
+    async def _delayed_lavalink_reconnect(self, *, delay: float, reason: str) -> None:
+        try:
+            await asyncio.sleep(delay)
+            connected = await self.connect_lavalink(self._lavalink_user_id) if self._lavalink_user_id is not None else False
+            if not connected:
+                next_delay = self._record_node_disconnect_failure()
+                self.logger.warning(
+                    "Lavalink reconnect failed after %s; retrying in %.1fs",
+                    reason,
+                    next_delay,
+                )
+                self._node_reconnect_task = asyncio.create_task(
+                    self._delayed_lavalink_reconnect(delay=next_delay, reason=reason)
+                )
+                return
+
+            await self._rebind_voice_sessions()
+        finally:
+            current_task = asyncio.current_task()
+            if self._node_reconnect_task is current_task:
+                self._node_reconnect_task = None
 
     async def _close_lavalink_client(self, client: Optional[lavalink.Client]) -> None:
         if client is None:
@@ -147,6 +189,7 @@ class MusicRuntime:
                     reason,
                 )
                 self._reset_no_nodes_reconnect_backoff()
+                self._reset_node_disconnect_backoff()
                 return True
             except Exception as error:
                 self.lavalink_client = None
@@ -159,6 +202,38 @@ class MusicRuntime:
                     )
                 self.logger.error("Failed to reconnect to Lavalink after %s: %s", reason, error)
                 return False
+
+    async def handle_node_disconnect(self, *, code: Any, reason: Any) -> None:
+        if not self.music_available or self._lavalink_user_id is None:
+            return
+
+        if self._node_reconnect_task and not self._node_reconnect_task.done():
+            self.logger.warning(
+                "Ignoring additional Lavalink disconnect while reconnect is already scheduled: code=%s reason=%s",
+                code,
+                reason,
+            )
+            return
+
+        delay = self._record_node_disconnect_failure()
+        old_client = self.lavalink_client
+        self.lavalink_client = None
+        await self._close_lavalink_client(old_client)
+        self.logger.warning(
+            "Backing off Lavalink reconnect for %.1fs after websocket disconnect code=%s reason=%s",
+            delay,
+            code,
+            reason,
+        )
+        self._node_reconnect_task = asyncio.create_task(
+            self._delayed_lavalink_reconnect(delay=delay, reason="node websocket disconnect")
+        )
+
+    def handle_node_ready(self) -> None:
+        self._reset_node_disconnect_backoff()
+        reconnect_task = self._node_reconnect_task
+        if reconnect_task and reconnect_task.done():
+            self._node_reconnect_task = None
 
     async def require_lavalink(self, ctx: SlashContext) -> bool:
         if self.lavalink_ready():
@@ -737,6 +812,18 @@ class LavalinkEvents:
     @lavalink.listener(lavalink.QueueEndEvent)
     async def queue_end(self, event: lavalink.QueueEndEvent) -> None:
         await self.manager.schedule_idle(event.player.guild_id)
+
+    @lavalink.listener(lavalink.NodeDisconnectedEvent)
+    async def node_disconnected(self, event: lavalink.NodeDisconnectedEvent) -> None:
+        runtime = self.manager.runtime
+        await runtime.handle_node_disconnect(
+            code=getattr(event, "code", None),
+            reason=getattr(event, "reason", None),
+        )
+
+    @lavalink.listener(lavalink.NodeReadyEvent)
+    async def node_ready(self, event: lavalink.NodeReadyEvent) -> None:
+        self.manager.runtime.handle_node_ready()
 
     @lavalink.listener(lavalink.TrackExceptionEvent)
     async def track_exception(self, event: lavalink.TrackExceptionEvent) -> None:
