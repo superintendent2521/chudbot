@@ -45,6 +45,8 @@ class MusicRuntime:
         self.lavalink_client: Optional[lavalink.Client] = None
         self._lavalink_user_id: Optional[int] = None
         self._lavalink_reconnect_lock = asyncio.Lock()
+        self._no_nodes_retry_count = 0
+        self._no_nodes_retry_after = 0.0
         self.manager = MusicManager(self)
         self.voice_channel_ids: Dict[int, int] = {}
         self.voice_session_ids: Dict[int, str] = {}
@@ -58,6 +60,22 @@ class MusicRuntime:
     @staticmethod
     def _is_no_available_nodes_error(error: Exception) -> bool:
         return isinstance(error, lavalink.errors.ClientError) and "No available nodes" in str(error)
+
+    def _can_retry_no_nodes_reconnect(self) -> bool:
+        return asyncio.get_running_loop().time() >= self._no_nodes_retry_after
+
+    def _record_no_nodes_reconnect_failure(self) -> float:
+        self._no_nodes_retry_count += 1
+        backoff_seconds = min(60.0, float(2 ** min(self._no_nodes_retry_count, 5)))
+        self._no_nodes_retry_after = asyncio.get_running_loop().time() + backoff_seconds
+        return backoff_seconds
+
+    def _reset_no_nodes_reconnect_backoff(self) -> None:
+        self._no_nodes_retry_count = 0
+        self._no_nodes_retry_after = 0.0
+
+    def _remaining_no_nodes_backoff(self) -> float:
+        return max(0.0, self._no_nodes_retry_after - asyncio.get_running_loop().time())
 
     async def _close_lavalink_client(self, client: Optional[lavalink.Client]) -> None:
         if client is None:
@@ -107,6 +125,14 @@ class MusicRuntime:
         if not self.music_available or self._lavalink_user_id is None:
             return False
 
+        if "no available nodes" in reason and not self._can_retry_no_nodes_reconnect():
+            self.logger.warning(
+                "Skipping Lavalink reconnect after %s due to backoff (%.1fs remaining)",
+                reason,
+                self._remaining_no_nodes_backoff(),
+            )
+            return False
+
         async with self._lavalink_reconnect_lock:
             old_client = self.lavalink_client
             self.lavalink_client = None
@@ -120,9 +146,17 @@ class MusicRuntime:
                     self.lavalink_port,
                     reason,
                 )
+                self._reset_no_nodes_reconnect_backoff()
                 return True
             except Exception as error:
                 self.lavalink_client = None
+                if "no available nodes" in reason:
+                    backoff_seconds = self._record_no_nodes_reconnect_failure()
+                    self.logger.warning(
+                        "Backing off Lavalink reconnects for %.1fs after %s",
+                        backoff_seconds,
+                        reason,
+                    )
                 self.logger.error("Failed to reconnect to Lavalink after %s: %s", reason, error)
                 return False
 
@@ -632,6 +666,11 @@ class MusicManager:
                 raise
 
             self.runtime.logger.warning("Lavalink reported no available nodes while loading tracks: %s", error)
+            if not self.runtime._can_retry_no_nodes_reconnect():
+                raise MusicError(
+                    f"Lavalink is unavailable right now. Backing off retries for another "
+                    f"{self.runtime._remaining_no_nodes_backoff():.0f}s."
+                )
             reconnected = await self.runtime.reconnect_lavalink(reason="no available nodes during track load")
             if not reconnected:
                 raise MusicError("Lavalink is unavailable right now. Try again in a moment.")
