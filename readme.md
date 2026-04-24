@@ -1,8 +1,7 @@
-# bot used for specialty discord server, logs voice chat joins and leaves, and can see if anyone is on a minecraft server
+# bot used for specialty discord server and logs voice chat joins and leaves
 
 - Requires `discord-py-interactions`
 - Music support for YouTube & YouTube Music via `/play`, `/skip`, `/pause`, `/resume`, `/queue`, and `/stop` powered by Lavalink
-- Slash command `/mcstatus` reports the Agartha server status
 - `/ban` now requires a reason and writes a ban log to the configured channel
 - `/faq`, `/faqset`, and `/faqremove` provide JSON-backed FAQ entries stored in `faq_entries.json`
 - `#github` is treated as a webhook-only channel and non-webhook posts are removed
