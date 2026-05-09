@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Any, Iterable, Optional
+from collections.abc import Iterable as IterableABC
+from typing import Any, Callable, Iterable, Optional, cast
 
 from interactions import SlashContext, slash_command
 
@@ -20,14 +21,14 @@ def _iter_values(value: Any) -> list[Any]:
     values = getattr(value, "values", None)
     if callable(values):
         try:
-            return list(values())
+            values_fn = cast(Callable[[], Iterable[Any]], values)
+            return list(values_fn())
         except TypeError:
             pass
 
-    try:
+    if isinstance(value, IterableABC):
         return list(value)
-    except TypeError:
-        return []
+    return []
 
 
 def _object_id(value: Any) -> Optional[int]:
@@ -125,19 +126,25 @@ def _current_rss_bytes() -> Optional[int]:
             pass
 
     try:
-        import psutil
-
-        return int(psutil.Process(os.getpid()).memory_info().rss)
-    except (ImportError, OSError):
+        psutil_module = __import__("psutil")
+        process_cls = getattr(psutil_module, "Process")
+        process = process_cls(os.getpid())
+        return int(process.memory_info().rss)
+    except (ImportError, AttributeError, OSError):
         pass
 
     try:
-        import resource
+        resource_module = __import__("resource")
     except ImportError:
         return None
 
+    getrusage = getattr(resource_module, "getrusage", None)
+    rusage_self = getattr(resource_module, "RUSAGE_SELF", None)
+    if not callable(getrusage) or rusage_self is None:
+        return None
+
     try:
-        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        usage = getrusage(rusage_self).ru_maxrss
     except OSError:
         return None
     if sys.platform == "darwin":
@@ -166,6 +173,8 @@ def _format_ping(bot: Any) -> str:
         if callable(latency):
             latency = latency()
         if latency is None:
+            continue
+        if not isinstance(latency, (int, float, str)):
             continue
         try:
             latency_float = float(latency)
@@ -209,6 +218,9 @@ def _get_playing_music_channel_count(lavalink_client: Any) -> int:
         if not _player_is_playing(player):
             continue
         channel_id = getattr(player, "channel_id", None)
+        if channel_id is None:
+            fallback_count += 1
+            continue
         try:
             channel_ids.add(int(channel_id))
         except (TypeError, ValueError):
