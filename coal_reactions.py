@@ -118,13 +118,13 @@ def create_coal_reaction_listeners(
             if channel is not None:
                 channel_id = snowflake_to_int(getattr(channel, "id", channel))
 
-            base_description = f"Got {coal_count} :rock: reactions"
+            base_description = f"Got {coal_count} <:Coal:1457140176072741040> reactions"
             if force_post:
                 base_description += "\nFeatured early by admin reaction."
             base_description += f"\n\n**Original Message:**\n{message_content[:1000]}"
 
             embed = Embed(
-                title=f"🪨 {username} posted this",
+                title=f"<:Coal:1457140176072741040> {username} posted this",
                 description=base_description,
                 color=0x2F3136,
             )
