@@ -17,7 +17,6 @@ from voice_logging import VoiceLogStore, create_voice_logging_listeners
 from member_join_handler import create_member_join_listeners
 from gem_reactions import create_gem_reaction_listeners
 from coal_reactions import create_coal_reaction_listeners
-from fixupx_link_listener import create_fixupx_listener
 from message_delete_logging import create_message_delete_logging_listeners
 
 load_dotenv()
@@ -136,8 +135,7 @@ for listener in create_gem_reaction_listeners(gem_board_store, logger):
     bot.add_listener(listener)
 for listener in create_coal_reaction_listeners(coal_board_store, REACTION_ROLE_ADMIN_ROLE_ID, logger):
     bot.add_listener(listener)
-for listener in create_fixupx_listener(logger):
-    bot.add_listener(listener)
+
 for listener in create_message_delete_logging_listeners(audit_log_store, logger):
     bot.add_listener(listener)
 
