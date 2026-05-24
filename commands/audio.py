@@ -81,13 +81,13 @@ def setup(handler: CommandHandler) -> None:
         guild_id = int(ctx.guild_id)
         session = music_manager.get_session(guild_id)
         session.cancel_idle_timer()
-        player = music_manager.get_player(guild_id)
-        if default_volume != player.volume:
-            try:
-                await player.set_volume(default_volume)
-            except Exception as error:
-                logger.warning("Unable to set player volume to %s: %s", default_volume, error)
         try:
+            player = music_manager.get_player(guild_id)
+            if default_volume != player.volume:
+                try:
+                    await player.set_volume(default_volume)
+                except Exception as error:
+                    logger.warning("Unable to set player volume to %s: %s", default_volume, error)
             await session.ensure_connected(voice_channel)
             await music_manager.wait_for_player_connection(guild_id)
         except asyncio.TimeoutError:
