@@ -148,6 +148,12 @@ def setup(handler: CommandHandler) -> None:
 
         session.cancel_idle_timer()
         if not player.is_playing:
+            logger.info(
+                "Starting playback from /play in guild %s: current=%s queue_size=%s",
+                guild_id,
+                getattr(getattr(player, "current", None), "title", None),
+                len(getattr(player, "queue", []) or []),
+            )
             await player.play()
 
     @slash_command(name="skip", description="Skip the currently playing track")

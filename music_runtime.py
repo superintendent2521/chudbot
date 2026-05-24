@@ -933,6 +933,21 @@ class LavalinkEvents:
             getattr(event, "exception", "Unknown error"),
         )
         if getattr(player, "queue", None):
+            if getattr(player, "is_playing", False):
+                logger.warning(
+                    "Not calling player.play() after track exception in guild %s because playback is still active: "
+                    "current=%s queue_size=%s",
+                    player.guild_id,
+                    getattr(getattr(player, "current", None), "title", None),
+                    len(getattr(player, "queue", []) or []),
+                )
+                return
+            logger.info(
+                "Advancing queue after track exception in guild %s: current=%s queue_size=%s",
+                player.guild_id,
+                getattr(getattr(player, "current", None), "title", None),
+                len(getattr(player, "queue", []) or []),
+            )
             play = getattr(player, "play", None)
             if callable(play):
                 await play()
