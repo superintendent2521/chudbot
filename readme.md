@@ -1,7 +1,7 @@
 # bot used for specialty discord server, logs voice chat joins and leaves, and can see if anyone is on a minecraft server
 
 - Requires `discord-py-interactions`
-- Music support for YouTube & YouTube Music via `/play`, `/skip`, `/pause`, `/resume`, `/queue`, and `/stop` powered by Lavalink
+- Music support for YouTube & YouTube Music via `/play`, `/skip`, `/pause`, `/resume`, `/nowplaying`, `/queue`, and `/stop` powered by Lavalink
 - Slash command `/mcstatus` reports the Agartha server status
 - Requires access to a running Lavalink node (remote is fine) – configure host, port, password, region, and SSL settings in `.env`
 

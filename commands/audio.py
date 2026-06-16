@@ -1,7 +1,7 @@
 """Music-related slash commands."""
 
 import asyncio
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from interactions import OptionType, SlashContext, slash_command, slash_option
 from interactions.models import Embed
@@ -37,6 +37,21 @@ def setup(handler: CommandHandler) -> None:
         if isinstance(extra, dict):
             return extra.get("requester")
         return None
+
+    def _player_position_ms(player: Any) -> Optional[int]:
+        position = getattr(player, "position", None)
+        if position is None:
+            return None
+        try:
+            return max(0, int(position))
+        except (TypeError, ValueError):
+            return None
+
+    def _remaining_duration_ms(track: lavalink.AudioTrack, position_ms: Optional[int]) -> Optional[int]:
+        duration = getattr(track, "duration", None)
+        if duration is None or duration <= 0 or position_ms is None:
+            return None
+        return max(0, int(duration) - position_ms)
 
     def _build_track_embed(
         *,
@@ -188,7 +203,8 @@ def setup(handler: CommandHandler) -> None:
             await ctx.send("There's nothing playing to pause.", ephemeral=True)
             return
         await player.set_pause(True)
-        await ctx.send("Paused the music.")
+        title = getattr(player.current, "title", "the current track")
+        await ctx.send(f"Paused **{title}**.")
 
     @slash_command(name="resume", description="Resume playback if paused")
     async def resume_command(ctx: SlashContext):
@@ -206,6 +222,49 @@ def setup(handler: CommandHandler) -> None:
             return
         await player.set_pause(False)
         await ctx.send("Resumed playback.")
+
+    @slash_command(name="nowplaying", description="Show details about the current song")
+    async def now_playing_command(ctx: SlashContext):
+        if not await require_lavalink(ctx):
+            return
+        if not ctx.guild_id:
+            await ctx.send("This command must be used inside a server.", ephemeral=True)
+            return
+        lavalink_client = get_lavalink_client()
+        player = lavalink_client.player_manager.get(int(ctx.guild_id)) if lavalink_client else None
+        if not player or not player.current:
+            await ctx.send("Nothing is playing right now.", ephemeral=True)
+            return
+
+        track = player.current
+        requester = _track_requester(track)
+        requester_text = f"<@{requester}>" if requester is not None else "unknown"
+        position_ms = _player_position_ms(player)
+        remaining_ms = _remaining_duration_ms(track, position_ms)
+        elapsed_text = format_duration(position_ms) if position_ms is not None else "Unknown"
+        duration = getattr(track, "duration", None)
+        duration_text = format_duration(duration)
+        remaining_text = "LIVE" if duration is None or duration <= 0 else (
+            format_duration(remaining_ms) if remaining_ms is not None else "Unknown"
+        )
+        status_text = "Paused" if getattr(player, "paused", False) else "Playing"
+        author = getattr(track, "author", None)
+        author_line = f"By: {author}\n" if author else ""
+
+        embed = _build_track_embed(
+            title="Now Playing",
+            description=(
+                f"**{track.title}**\n"
+                f"{author_line}"
+                f"Requested by {requester_text}\n"
+                f"Status: `{status_text}`\n"
+                f"Length: `{duration_text}`\n"
+                f"Elapsed: `{elapsed_text}`\n"
+                f"Remaining: `{remaining_text}`"
+            ),
+            track=track,
+        )
+        await ctx.send(embed=embed)
 
     @slash_command(name="queue", description="Show the current music queue")
     async def queue_command(ctx: SlashContext):
@@ -277,6 +336,7 @@ def setup(handler: CommandHandler) -> None:
     handler.register_slash_command(skip_command)
     handler.register_slash_command(pause_command)
     handler.register_slash_command(resume_command)
+    handler.register_slash_command(now_playing_command)
     handler.register_slash_command(queue_command)
     handler.register_slash_command(stop_command)
 
