@@ -25,6 +25,8 @@ YOUTUBE_HOSTS = {
     "www.youtu.be",
 }
 
+LAVALINK_MAX_RECONNECT_SECONDS = 30.0
+
 
 class MusicRuntime:
     def __init__(
@@ -61,6 +63,7 @@ class MusicRuntime:
         self._no_nodes_retry_after = 0.0
         self._node_disconnect_retry_count = 0
         self._node_reconnect_task: Optional[asyncio.Task] = None
+        self._node_reconnect_deadline: Optional[float] = None
         self.manager = MusicManager(self)
         self.voice_channel_ids: Dict[int, int] = {}
         self.voice_session_ids: Dict[int, str] = {}
@@ -80,7 +83,10 @@ class MusicRuntime:
 
     def _record_no_nodes_reconnect_failure(self) -> float:
         self._no_nodes_retry_count += 1
-        backoff_seconds = min(60.0, float(2 ** min(self._no_nodes_retry_count, 5)))
+        backoff_seconds = min(
+            LAVALINK_MAX_RECONNECT_SECONDS,
+            float(2 ** min(self._no_nodes_retry_count, 5)),
+        )
         self._no_nodes_retry_after = asyncio.get_running_loop().time() + backoff_seconds
         return backoff_seconds
 
@@ -99,7 +105,10 @@ class MusicRuntime:
 
     def _record_node_disconnect_failure(self) -> float:
         self._node_disconnect_retry_count += 1
-        return min(60.0, float(5 * (2 ** min(self._node_disconnect_retry_count - 1, 4))))
+        return min(
+            LAVALINK_MAX_RECONNECT_SECONDS,
+            float(5 * (2 ** min(self._node_disconnect_retry_count - 1, 4))),
+        )
 
     def _reset_node_disconnect_backoff(self) -> None:
         self._node_disconnect_retry_count = 0
@@ -117,7 +126,26 @@ class MusicRuntime:
 
     async def _delayed_lavalink_reconnect(self, *, delay: float, reason: str) -> None:
         try:
-            await asyncio.sleep(delay)
+            loop = asyncio.get_running_loop()
+            deadline = self._node_reconnect_deadline
+            remaining = deadline - loop.time() if deadline is not None else 0.0
+            if remaining <= 0:
+                self.logger.error(
+                    "Stopped retrying Lavalink after %.0fs (%s)",
+                    LAVALINK_MAX_RECONNECT_SECONDS,
+                    reason,
+                )
+                return
+
+            await asyncio.sleep(min(delay, remaining))
+            if loop.time() >= deadline:
+                self.logger.error(
+                    "Stopped retrying Lavalink after %.0fs (%s)",
+                    LAVALINK_MAX_RECONNECT_SECONDS,
+                    reason,
+                )
+                return
+
             connected = await self.connect_lavalink(self._lavalink_user_id) if self._lavalink_user_id is not None else False
             if not connected:
                 next_delay = self._record_node_disconnect_failure()
@@ -237,6 +265,16 @@ class MusicRuntime:
             )
             return
 
+        loop = asyncio.get_running_loop()
+        if self._node_reconnect_deadline is None:
+            self._node_reconnect_deadline = loop.time() + LAVALINK_MAX_RECONNECT_SECONDS
+        elif loop.time() >= self._node_reconnect_deadline:
+            self.logger.error(
+                "Stopped retrying Lavalink after %.0fs; restart or restore the node before trying again",
+                LAVALINK_MAX_RECONNECT_SECONDS,
+            )
+            return
+
         delay = self._record_node_disconnect_failure()
         old_client = self.lavalink_client
         self.lavalink_client = None
@@ -255,6 +293,7 @@ class MusicRuntime:
     def handle_node_ready(self) -> None:
         self._lavalink_node_ready = True
         self._reset_node_disconnect_backoff()
+        self._node_reconnect_deadline = None
         reconnect_task = self._node_reconnect_task
         if reconnect_task and reconnect_task.done():
             self._node_reconnect_task = None
@@ -850,7 +889,16 @@ class MusicManager:
             result = await client.get_tracks(identifier)
         except lavalink.errors.ClientError as error:
             if not self.runtime._is_no_available_nodes_error(error):
-                raise
+                self.runtime.logger.warning(
+                    "Lavalink rejected track identifier %r: %s",
+                    identifier,
+                    error or type(error).__name__,
+                    exc_info=True,
+                )
+                raise MusicError(
+                    "The Lavalink node rejected the track request. Check that the bot and "
+                    "Lavalink versions, password, and REST endpoint configuration match."
+                ) from error
 
             self.runtime.logger.warning("Lavalink reported no available nodes while loading tracks: %s", error)
             if not self.runtime._can_retry_no_nodes_reconnect():
@@ -882,7 +930,16 @@ class MusicManager:
             except lavalink.errors.ClientError as retry_error:
                 if self.runtime._is_no_available_nodes_error(retry_error):
                     raise MusicError("Lavalink is unavailable right now. Try again in a moment.")
-                raise
+                self.runtime.logger.warning(
+                    "Lavalink rejected retried track identifier %r: %s",
+                    identifier,
+                    retry_error or type(retry_error).__name__,
+                    exc_info=True,
+                )
+                raise MusicError(
+                    "The Lavalink node rejected the track request. Check that the bot and "
+                    "Lavalink versions, password, and REST endpoint configuration match."
+                ) from retry_error
         return result
 
     async def load_tracks(self, query: str, guild_id: Optional[int] = None) -> lavalink.LoadResult:
