@@ -26,6 +26,13 @@ logger = logging.getLogger("chuds.bot")
 MUSIC_IDLE_TIMEOUT = 90
 VOICE_CONNECT_TIMEOUT = 15
 DEFAULT_PLAYER_VOLUME = 50
+AUDIO_NORMALIZATION = os.getenv("AUDIO_NORMALIZATION", "true").strip().lower() in {"1", "true", "yes"}
+try:
+    NORMALIZATION_MAX_AMPLITUDE = float(os.getenv("NORMALIZATION_MAX_AMPLITUDE", "0.75"))
+except ValueError:
+    NORMALIZATION_MAX_AMPLITUDE = 0.75
+    logger.warning("NORMALIZATION_MAX_AMPLITUDE must be numeric; using 0.75")
+NORMALIZATION_MAX_AMPLITUDE = max(0.1, min(NORMALIZATION_MAX_AMPLITUDE, 1.0))
 REACTION_ROLE_ADMIN_ROLE_ID = 1_434_633_532_436_648_126
 DEFAULT_REACTION_ROLE_EMOJI = "🥀"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -86,6 +93,8 @@ music_runtime = MusicRuntime(
     idle_timeout=MUSIC_IDLE_TIMEOUT,
     voice_connect_timeout=VOICE_CONNECT_TIMEOUT,
     default_player_volume=DEFAULT_PLAYER_VOLUME,
+    audio_normalization=AUDIO_NORMALIZATION,
+    normalization_max_amplitude=NORMALIZATION_MAX_AMPLITUDE,
 )
 bot = Client(
     token=BOT_TOKEN,

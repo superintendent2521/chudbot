@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import lavalink
+from lavalink.filters import Filter
 from interactions import Client, Member, SlashContext, User, listen
 from interactions.api.events import RawGatewayEvent, WebsocketReady
 
@@ -28,6 +29,25 @@ YOUTUBE_HOSTS = {
 LAVALINK_MAX_RECONNECT_SECONDS = 30.0
 
 
+class AudioNormalization(Filter):
+    """LavaDSPX peak normalizer exposed through Lavalink's plugin filters."""
+
+    def __init__(self, max_amplitude: float, adaptive: bool) -> None:
+        super().__init__()
+        self.max_amplitude = max_amplitude
+        self.adaptive = adaptive
+
+    def serialize(self) -> Dict[str, Any]:
+        return {
+            "pluginFilters": {
+                "normalization": {
+                    "maxAmplitude": self.max_amplitude,
+                    "adaptive": self.adaptive,
+                }
+            }
+        }
+
+
 class MusicRuntime:
     def __init__(
         self,
@@ -43,6 +63,8 @@ class MusicRuntime:
         idle_timeout: int,
         voice_connect_timeout: int,
         default_player_volume: int,
+        audio_normalization: bool,
+        normalization_max_amplitude: float,
     ) -> None:
         self.logger = logger
         self.lavalink_host = lavalink_host
@@ -55,6 +77,9 @@ class MusicRuntime:
         self.idle_timeout = idle_timeout
         self.voice_connect_timeout = voice_connect_timeout
         self.default_player_volume = default_player_volume
+        self.audio_normalization = audio_normalization
+        self.normalization_max_amplitude = normalization_max_amplitude
+        self._normalization_unavailable = False
         self.lavalink_client: Optional[lavalink.Client] = None
         self._lavalink_user_id: Optional[int] = None
         self._lavalink_node_ready = False
@@ -797,6 +822,41 @@ class MusicManager:
                 self._handle_no_available_nodes("creating player")
                 raise MusicError("Lavalink is connected, but no node is ready yet. Try again in a few seconds.")
             raise
+
+    async def ensure_audio_normalization(self, player: Any) -> None:
+        """Apply normalization once per player without making playback depend on the plugin."""
+        runtime = self.runtime
+        if not runtime.audio_normalization or runtime._normalization_unavailable:
+            return
+        if player.fetch("audio_normalization_applied", False):
+            return
+
+        normalizer = AudioNormalization(
+            max_amplitude=runtime.normalization_max_amplitude,
+            adaptive=True,
+        )
+        try:
+            await player.set_filter(normalizer)
+        except Exception as error:
+            # set_filter records the filter locally before contacting Lavalink.
+            # Remove it so reconnects do not keep retrying an unsupported plugin.
+            filters = getattr(player, "filters", None)
+            if isinstance(filters, dict):
+                filters.pop(type(normalizer).__name__.lower(), None)
+            runtime._normalization_unavailable = True
+            runtime.logger.warning(
+                "Audio normalization is enabled, but the Lavalink node rejected the "
+                "LavaDSPX normalization filter. Playback will continue without it: %s",
+                error,
+            )
+            return
+
+        player.store("audio_normalization_applied", True)
+        runtime.logger.info(
+            "Enabled audio normalization for guild %s (max amplitude %.2f)",
+            player.guild_id,
+            runtime.normalization_max_amplitude,
+        )
 
     async def wait_for_player_connection(self, guild_id: int) -> None:
         client = self.runtime.get_lavalink_client()

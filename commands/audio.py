@@ -98,6 +98,7 @@ def setup(handler: CommandHandler) -> None:
         session.cancel_idle_timer()
         try:
             player = music_manager.get_player(guild_id)
+            await music_manager.ensure_audio_normalization(player)
             if default_volume != player.volume:
                 try:
                     await player.set_volume(default_volume)
