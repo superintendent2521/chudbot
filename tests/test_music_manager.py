@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+from abc import ABC, abstractmethod
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -22,14 +23,25 @@ else:
 if "lavalink.filters" not in sys.modules:
     filters = types.ModuleType("lavalink.filters")
 
-    class Filter:
-        pass
+    class Filter(ABC):
+        def __init__(self, values, plugin_filter=False):
+            self.values = values
+            self.plugin_filter = plugin_filter
+
+        @abstractmethod
+        def update(self, **kwargs):
+            raise NotImplementedError
+
+        @abstractmethod
+        def serialize(self):
+            raise NotImplementedError
 
     filters.Filter = Filter
     lavalink.filters = filters
     sys.modules["lavalink.filters"] = filters
 
 from music_manager import MusicManager
+from music_filters import AudioNormalization
 
 
 class MusicManagerNormalizationTests(unittest.IsolatedAsyncioTestCase):
@@ -58,6 +70,15 @@ class MusicManagerNormalizationTests(unittest.IsolatedAsyncioTestCase):
 
         player.set_filter.assert_awaited_once()
         self.assertTrue(stored["audio_normalization_applied"])
+
+    def test_filter_implements_lavalink_abstract_contract(self) -> None:
+        normalizer = AudioNormalization(max_amplitude=0.75, adaptive=True)
+
+        self.assertTrue(normalizer.plugin_filter)
+        self.assertEqual(
+            normalizer.serialize(),
+            {"normalization": {"maxAmplitude": 0.75, "adaptive": True}},
+        )
 
     async def test_unsupported_filter_disables_future_attempts(self) -> None:
         runtime = self.make_runtime()
