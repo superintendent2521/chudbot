@@ -8,14 +8,14 @@ from unittest.mock import AsyncMock, Mock
 
 if "interactions" not in sys.modules:
     interactions = types.ModuleType("interactions")
-    interactions.Client = object
+    setattr(interactions, "Client", object)
     sys.modules["interactions"] = interactions
 
 if "lavalink" not in sys.modules:
     lavalink = types.ModuleType("lavalink")
-    lavalink.LoadResult = object
-    lavalink.LoadType = types.SimpleNamespace(ERROR="error", EMPTY="empty")
-    lavalink.errors = types.SimpleNamespace(ClientError=RuntimeError)
+    setattr(lavalink, "LoadResult", object)
+    setattr(lavalink, "LoadType", types.SimpleNamespace(ERROR="error", EMPTY="empty"))
+    setattr(lavalink, "errors", types.SimpleNamespace(ClientError=RuntimeError))
     sys.modules["lavalink"] = lavalink
 else:
     lavalink = sys.modules["lavalink"]
@@ -36,8 +36,8 @@ if "lavalink.filters" not in sys.modules:
         def serialize(self):
             raise NotImplementedError
 
-    filters.Filter = Filter
-    lavalink.filters = filters
+    setattr(filters, "Filter", Filter)
+    setattr(lavalink, "filters", filters)
     sys.modules["lavalink.filters"] = filters
 
 from music_manager import MusicManager

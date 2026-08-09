@@ -5,9 +5,9 @@ import unittest
 
 if "lavalink" not in sys.modules:
     lavalink = types.ModuleType("lavalink")
-    lavalink.LoadResult = object
-    lavalink.LoadType = types.SimpleNamespace(ERROR="error", EMPTY="empty")
-    lavalink.errors = types.SimpleNamespace(ClientError=RuntimeError)
+    setattr(lavalink, "LoadResult", object)
+    setattr(lavalink, "LoadType", types.SimpleNamespace(ERROR="error", EMPTY="empty"))
+    setattr(lavalink, "errors", types.SimpleNamespace(ClientError=RuntimeError))
     sys.modules["lavalink"] = lavalink
 
 from music_errors import MusicError

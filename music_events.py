@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
 
 import lavalink
 
@@ -70,6 +71,6 @@ class LavalinkEvents:
             )
             play = getattr(player, "play", None)
             if callable(play):
-                await play()
+                await cast(Callable[[], Awaitable[Any]], play)()
         else:
             await self.manager.schedule_idle(player.guild_id)
