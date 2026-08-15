@@ -25,14 +25,26 @@ from blackjack_game import hand_value, new_game, play_dealer, profit as blackjac
 from command_handler import CommandHandler
 from economy_store import (
     BASE_ROB_SUCCESS_PERCENT,
+    MAX_LOAN_AMOUNT,
     MAX_SECURITY_LEVEL,
     rob_success_chance,
 )
+from spaceflight_bounties import BOUNTIES
 
 
 MINIMUM_WAGER = 10
 WORK_REWARD_MIN = 75
 WORK_REWARD_MAX = 200
+MEMORY_REWARD = 250
+MEMORY_SYMBOLS = ("🚀", "🛰️", "🌕", "🪐", "☄️")
+FISH_CATCHES = (
+    ("an old boot", 20, 35, 18),
+    ("a bluegill", 45, 75, 30),
+    ("a trout", 70, 110, 25),
+    ("a salmon", 100, 160, 17),
+    ("a golden koi", 200, 300, 8),
+    ("the legendary voidfish", 500, 750, 2),
+)
 SLOT_SYMBOLS = ("🍒", "🍋", "🍇", "🔔", "💎")
 ROULETTE_RED_NUMBERS = frozenset(
     {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
@@ -150,9 +162,274 @@ def setup(handler: CommandHandler) -> None:
                 ephemeral=True,
             )
             return
+        if result.garnished:
+            await ctx.send(
+                f"🔨 You earned **{_format_coins(result.gross_earned)}**. "
+                f"The bot garnished **{_format_coins(result.garnished)}** for your overdue loan, "
+                f"so you received **{_format_coins(result.earned)}**. "
+                f"Debt remaining: **{_format_coins(result.loan_remaining)}**. "
+                f"Balance: **{_format_coins(result.balance)}**."
+            )
+            return
         await ctx.send(
             f"🔨 You worked a shift and earned **{_format_coins(result.earned)}**. "
             f"Balance: **{_format_coins(result.balance)}**."
+        )
+
+    @slash_command(name="loan", description="Take a one-hour loan or check your current debt")
+    @slash_option(
+        name="amount",
+        description=f"Coins to borrow (100-{MAX_LOAN_AMOUNT:,}); omit to check your loan",
+        required=False,
+        opt_type=OptionType.INTEGER,
+    )
+    async def loan_command(ctx: SlashContext, amount: Optional[int] = None):
+        guild_id = await _require_guild(ctx)
+        if guild_id is None:
+            return
+        user_id = int(ctx.author.id)
+        if amount is None:
+            result = await store.loan_status(guild_id, user_id)
+            if result.status == "none":
+                await ctx.send(
+                    f"🏦 You have no active loan. You can borrow up to "
+                    f"**{_format_coins(MAX_LOAN_AMOUNT)}**.",
+                    ephemeral=True,
+                )
+                return
+            await ctx.send(
+                f"🏦 You owe **{_format_coins(result.loan_balance)}**, due "
+                f"<t:{result.loan_due}:R>. After that, half of each `/work` wage is garnished. "
+                f"Balance: **{_format_coins(result.balance)}**.",
+                ephemeral=True,
+            )
+            return
+
+        result = await store.take_loan(guild_id, user_id, amount)
+        if result.status == "invalid":
+            await ctx.send(
+                f"Loans must be between **100** and **{_format_coins(MAX_LOAN_AMOUNT)}**.",
+                ephemeral=True,
+            )
+        elif result.status == "active":
+            await ctx.send(
+                f"You already owe **{_format_coins(result.loan_balance)}**, due "
+                f"<t:{result.loan_due}:R>. Repay it before taking another loan.",
+                ephemeral=True,
+            )
+        else:
+            await ctx.send(
+                f"🏦 Loan approved for **{_format_coins(result.amount)}**. Repay it by "
+                f"<t:{result.loan_due}:R>. Balance: **{_format_coins(result.balance)}**."
+            )
+
+    @slash_command(name="repay", description="Repay some or all of your bot loan")
+    @slash_option(
+        name="amount",
+        description="Coins to repay; omit to repay as much as possible",
+        required=False,
+        opt_type=OptionType.INTEGER,
+    )
+    async def repay_command(ctx: SlashContext, amount: Optional[int] = None):
+        guild_id = await _require_guild(ctx)
+        if guild_id is None:
+            return
+        result = await store.repay_loan(guild_id, int(ctx.author.id), amount)
+        if result.status == "none":
+            await ctx.send("You don't have an active loan.", ephemeral=True)
+        elif result.status == "invalid":
+            await ctx.send(
+                f"You can't make that payment. Balance: **{_format_coins(result.balance)}**.",
+                ephemeral=True,
+            )
+        elif result.loan_balance:
+            await ctx.send(
+                f"🏦 You repaid **{_format_coins(result.amount)}**. Remaining debt: "
+                f"**{_format_coins(result.loan_balance)}**. Balance: "
+                f"**{_format_coins(result.balance)}**."
+            )
+        else:
+            await ctx.send(
+                f"🏦 Loan fully repaid with **{_format_coins(result.amount)}**. "
+                f"Balance: **{_format_coins(result.balance)}**."
+            )
+
+    @slash_command(name="fish", description="Go fishing for coins (5-minute cooldown)")
+    async def fish_command(ctx: SlashContext):
+        guild_id = await _require_guild(ctx)
+        if guild_id is None:
+            return
+        user_id = int(ctx.author.id)
+        started = await store.start_activity(guild_id, user_id, "fish")
+        if not started.started:
+            await ctx.send(
+                f"🎣 The fish aren't biting yet. Try again in "
+                f"**{_format_wait(started.retry_after)}**.",
+                ephemeral=True,
+            )
+            return
+        catch = _random.choices(FISH_CATCHES, weights=[entry[3] for entry in FISH_CATCHES], k=1)[0]
+        reward = _random.randint(catch[1], catch[2])
+        balance = await store.credit_activity_reward(guild_id, user_id, reward)
+        await ctx.send(
+            f"🎣 {ctx.author.mention} caught **{catch[0]}** worth "
+            f"**{_format_coins(reward)}**. Balance: **{_format_coins(balance)}**."
+        )
+
+    @slash_command(name="memory", description="Repeat a hidden space sequence for coins")
+    async def memory_command(ctx: SlashContext):
+        guild_id = await _require_guild(ctx)
+        if guild_id is None:
+            return
+        user_id = int(ctx.author.id)
+        started = await store.start_activity(guild_id, user_id, "memory")
+        if not started.started:
+            await ctx.send(
+                f"🧠 You can play memory again in **{_format_wait(started.retry_after)}**.",
+                ephemeral=True,
+            )
+            return
+
+        sequence = tuple(_random.choice(MEMORY_SYMBOLS) for _ in range(5))
+        game_id = secrets.token_hex(8)
+        buttons = [
+            Button(
+                custom_id=f"memory_{game_id}_{index}",
+                style=ButtonStyle.PRIMARY,
+                emoji=symbol,
+            )
+            for index, symbol in enumerate(MEMORY_SYMBOLS)
+        ]
+        message = await ctx.send(
+            f"🧠 {ctx.author.mention} memorize this sequence:\n\n"
+            f"# {'  '.join(sequence)}\n\nIt disappears in **4 seconds**."
+        )
+        await asyncio.sleep(4)
+        await message.edit(
+            content="🧠 Repeat the five-symbol sequence:",
+            components=buttons,
+        )
+
+        async def memory_player_only(component: Any) -> bool:
+            if int(component.ctx.author.id) == user_id:
+                return True
+            await component.ctx.send("This isn't your memory game.", ephemeral=True)
+            return False
+
+        for position, expected in enumerate(sequence):
+            try:
+                component = await handler.bot.wait_for_component(
+                    components=buttons,
+                    check=memory_player_only,
+                    timeout=20,
+                )
+            except asyncio.TimeoutError:
+                for button in buttons:
+                    button.disabled = True
+                await message.edit(content="🧠 Time expired. No reward this round.", components=buttons)
+                return
+            selected_index = int(component.ctx.custom_id.rsplit("_", 1)[1])
+            if MEMORY_SYMBOLS[selected_index] != expected:
+                for button in buttons:
+                    button.disabled = True
+                await component.ctx.edit_origin(
+                    content=(
+                        f"🧠 Wrong symbol. The sequence was **{' '.join(sequence)}**. "
+                        "No reward this round."
+                    ),
+                    components=buttons,
+                )
+                return
+            if position < len(sequence) - 1:
+                await component.ctx.edit_origin(
+                    content=f"🧠 Correct so far: **{position + 1}/5**",
+                    components=buttons,
+                )
+                continue
+
+            for button in buttons:
+                button.disabled = True
+            balance = await store.credit_activity_reward(guild_id, user_id, MEMORY_REWARD)
+            await component.ctx.edit_origin(
+                content=(
+                    f"🧠 **Perfect memory!** You earned **{_format_coins(MEMORY_REWARD)}**. "
+                    f"Balance: **{_format_coins(balance)}**."
+                ),
+                components=buttons,
+            )
+
+    @slash_command(name="bounty", description="Complete a spaceflight bounty for coins")
+    async def bounty_command(ctx: SlashContext):
+        guild_id = await _require_guild(ctx)
+        if guild_id is None:
+            return
+        user_id = int(ctx.author.id)
+        started = await store.start_activity(guild_id, user_id, "bounty")
+        if not started.started:
+            await ctx.send(
+                f"🚀 No new bounty yet. Check again in **{_format_wait(started.retry_after)}**.",
+                ephemeral=True,
+            )
+            return
+
+        bounty = _random.choice(BOUNTIES)
+        answers = [(bounty.correct_answer, True)] + [
+            (answer, False) for answer in bounty.wrong_answers
+        ]
+        _random.shuffle(answers)
+        game_id = secrets.token_hex(8)
+        buttons = [
+            Button(
+                custom_id=f"bounty_{game_id}_{index}",
+                style=ButtonStyle.PRIMARY,
+                label=answer,
+            )
+            for index, (answer, _) in enumerate(answers)
+        ]
+        message = await ctx.send(
+            f"🚀 **Spaceflight Bounty** — {ctx.author.mention}\n{bounty.question}\n"
+            "You have **45 seconds**.",
+            components=buttons,
+        )
+
+        async def bounty_player_only(component: Any) -> bool:
+            if int(component.ctx.author.id) == user_id:
+                return True
+            await component.ctx.send("This isn't your bounty.", ephemeral=True)
+            return False
+
+        try:
+            component = await handler.bot.wait_for_component(
+                components=buttons,
+                check=bounty_player_only,
+                timeout=45,
+            )
+        except asyncio.TimeoutError:
+            for button in buttons:
+                button.disabled = True
+            await message.edit(
+                content=f"🚀 Bounty expired. The answer was **{bounty.correct_answer}**.",
+                components=buttons,
+            )
+            return
+
+        selected_index = int(component.ctx.custom_id.rsplit("_", 1)[1])
+        for button in buttons:
+            button.disabled = True
+        if not answers[selected_index][1]:
+            await component.ctx.edit_origin(
+                content=f"🚀 Incorrect. The answer was **{bounty.correct_answer}**.",
+                components=buttons,
+            )
+            return
+        reward = _random.randint(175, 300)
+        balance = await store.credit_activity_reward(guild_id, user_id, reward)
+        await component.ctx.edit_origin(
+            content=(
+                f"🚀 **Bounty complete!** You earned **{_format_coins(reward)}**. "
+                f"Balance: **{_format_coins(balance)}**."
+            ),
+            components=buttons,
         )
 
     @slash_command(name="gamble", description="Bet coins on a 50/50 game")
@@ -612,6 +889,11 @@ def setup(handler: CommandHandler) -> None:
     handler.register_slash_command(balance_command)
     handler.register_slash_command(leaderboard_command)
     handler.register_slash_command(work_command)
+    handler.register_slash_command(loan_command)
+    handler.register_slash_command(repay_command)
+    handler.register_slash_command(fish_command)
+    handler.register_slash_command(memory_command)
+    handler.register_slash_command(bounty_command)
     handler.register_slash_command(gamble_command)
     handler.register_slash_command(slots_command)
     handler.register_slash_command(roulette_command)

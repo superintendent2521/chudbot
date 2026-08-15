@@ -12,6 +12,11 @@ STARTING_BALANCE = 250
 WORK_COOLDOWN_SECONDS = 3 * 60
 ROB_COOLDOWN_SECONDS = 10 * 60
 ROB_ACTIVITY_WINDOW_SECONDS = 15 * 60
+LOAN_TERM_SECONDS = 60 * 60
+MAX_LOAN_AMOUNT = 5_000
+FISH_COOLDOWN_SECONDS = 5 * 60
+MEMORY_COOLDOWN_SECONDS = 5 * 60
+BOUNTY_COOLDOWN_SECONDS = 10 * 60
 DEFAULT_POSTGRES_URL = "postgresql://postgres:postgres@postgres/economy"
 BASE_ROB_SUCCESS_PERCENT = 45.0
 MAX_SECURITY_LEVEL = 20
@@ -44,6 +49,9 @@ class WorkResult:
     earned: int
     balance: int
     retry_after: int = 0
+    gross_earned: int = 0
+    garnished: int = 0
+    loan_remaining: int = 0
 
 
 @dataclass(frozen=True)
@@ -111,6 +119,22 @@ class EconomyStatistics:
     highest_balance: int
 
 
+@dataclass(frozen=True)
+class ActivityStartResult:
+    started: bool
+    balance: int
+    retry_after: int = 0
+
+
+@dataclass(frozen=True)
+class LoanResult:
+    status: Literal["borrowed", "active", "repaid", "none", "invalid"]
+    balance: int
+    loan_balance: int
+    loan_due: Optional[int]
+    amount: int = 0
+
+
 class PostgresEconomyStore:
     """Async PostgreSQL economy store backed by a reusable connection pool."""
 
@@ -176,6 +200,11 @@ class PostgresEconomyStore:
                     last_activity BIGINT,
                     last_work BIGINT,
                     last_rob BIGINT,
+                    last_fish BIGINT,
+                    last_memory BIGINT,
+                    last_bounty BIGINT,
+                    loan_balance BIGINT NOT NULL DEFAULT 0 CHECK (loan_balance >= 0),
+                    loan_due BIGINT,
                     security_level INTEGER NOT NULL DEFAULT 0
                         CHECK (security_level BETWEEN 0 AND 20),
                     PRIMARY KEY (guild_id, user_id)
@@ -186,6 +215,22 @@ class PostgresEconomyStore:
                 """ALTER TABLE economy_accounts
                    ADD COLUMN IF NOT EXISTS security_level INTEGER NOT NULL DEFAULT 0
                    CHECK (security_level BETWEEN 0 AND 20)"""
+            )
+            await connection.execute(
+                "ALTER TABLE economy_accounts ADD COLUMN IF NOT EXISTS last_fish BIGINT"
+            )
+            await connection.execute(
+                "ALTER TABLE economy_accounts ADD COLUMN IF NOT EXISTS last_memory BIGINT"
+            )
+            await connection.execute(
+                "ALTER TABLE economy_accounts ADD COLUMN IF NOT EXISTS last_bounty BIGINT"
+            )
+            await connection.execute(
+                """ALTER TABLE economy_accounts ADD COLUMN IF NOT EXISTS loan_balance BIGINT
+                   NOT NULL DEFAULT 0 CHECK (loan_balance >= 0)"""
+            )
+            await connection.execute(
+                "ALTER TABLE economy_accounts ADD COLUMN IF NOT EXISTS loan_due BIGINT"
             )
             await connection.execute(
                 """CREATE INDEX IF NOT EXISTS economy_leaderboard_idx
@@ -345,14 +390,35 @@ class PostgresEconomyStore:
                            (guild_id, user_id, balance, last_activity, last_work)
                        VALUES (%s, %s, %s + %s, %s, %s)
                        ON CONFLICT DO NOTHING
-                       RETURNING balance, TRUE AS worked, 0::BIGINT AS retry_after
-                   ), worked AS (
-                       UPDATE economy_accounts
-                       SET balance = balance + %s, last_activity = %s, last_work = %s
+                       RETURNING balance, TRUE AS worked, 0::BIGINT AS retry_after,
+                                 %s::BIGINT AS gross_earned, 0::BIGINT AS garnished,
+                                 0::BIGINT AS loan_remaining
+                   ), work_values AS (
+                       SELECT guild_id, user_id,
+                              CASE WHEN loan_balance > 0 AND loan_due <= %s
+                                   THEN LEAST(loan_balance, (%s + 1) / 2)
+                                   ELSE 0 END::BIGINT AS garnishment
+                       FROM economy_accounts
                        WHERE guild_id = %s AND user_id = %s
                          AND NOT EXISTS (SELECT 1 FROM inserted)
                          AND (last_work IS NULL OR last_work <= %s - %s)
-                       RETURNING balance, TRUE AS worked, 0::BIGINT AS retry_after
+                       FOR UPDATE
+                   ), worked AS (
+                       UPDATE economy_accounts AS account
+                       SET balance = account.balance + %s - work_values.garnishment,
+                           loan_balance = account.loan_balance - work_values.garnishment,
+                           loan_due = CASE
+                               WHEN account.loan_balance - work_values.garnishment = 0 THEN NULL
+                               ELSE account.loan_due END,
+                           last_activity = %s,
+                           last_work = %s
+                       FROM work_values
+                       WHERE account.guild_id = work_values.guild_id
+                         AND account.user_id = work_values.user_id
+                       RETURNING account.balance, TRUE AS worked, 0::BIGINT AS retry_after,
+                                 %s::BIGINT AS gross_earned,
+                                 work_values.garnishment AS garnished,
+                                 account.loan_balance AS loan_remaining
                    ), cooling_down AS (
                        UPDATE economy_accounts
                        SET last_activity = %s
@@ -360,22 +426,33 @@ class PostgresEconomyStore:
                          AND NOT EXISTS (SELECT 1 FROM inserted)
                          AND NOT EXISTS (SELECT 1 FROM worked)
                        RETURNING balance, FALSE AS worked,
-                           GREATEST(1, %s - (%s - last_work))::BIGINT AS retry_after
+                           GREATEST(1, %s - (%s - last_work))::BIGINT AS retry_after,
+                           0::BIGINT AS gross_earned, 0::BIGINT AS garnished,
+                           loan_balance AS loan_remaining
                    )
                    SELECT * FROM inserted
                    UNION ALL SELECT * FROM worked
                    UNION ALL SELECT * FROM cooling_down""",
                 (
-                    guild_id, user_id, STARTING_BALANCE, reward, timestamp, timestamp,
-                    reward, timestamp, timestamp, guild_id, user_id,
-                    timestamp, WORK_COOLDOWN_SECONDS,
+                    guild_id, user_id, STARTING_BALANCE, reward, timestamp, timestamp, reward,
+                    timestamp, reward, guild_id, user_id, timestamp, WORK_COOLDOWN_SECONDS,
+                    reward, timestamp, timestamp, reward,
                     timestamp, guild_id, user_id, WORK_COOLDOWN_SECONDS, timestamp,
                 ),
             )
             if row is None:  # Rare first-use race: retry after the competing insert commits.
                 return await self.work(guild_id, user_id, reward, now=timestamp)
             worked = bool(row["worked"])
-            return WorkResult(reward if worked else 0, int(row["balance"]), int(row["retry_after"]))
+            gross_earned = int(row["gross_earned"])
+            garnished = int(row["garnished"])
+            return WorkResult(
+                gross_earned - garnished if worked else 0,
+                int(row["balance"]),
+                int(row["retry_after"]),
+                gross_earned,
+                garnished,
+                int(row["loan_remaining"]),
+            )
 
     async def gamble(
         self,
@@ -481,6 +558,197 @@ class PostgresEconomyStore:
             if row is None:
                 raise RuntimeError("Reserved wager account no longer exists")
             return int(row["balance"])
+
+    async def credit_activity_reward(
+        self,
+        guild_id: int,
+        user_id: int,
+        amount: int,
+        *,
+        now: Optional[int] = None,
+    ) -> int:
+        """Credit a non-gambling game reward and mark the player active."""
+        timestamp = self._now(now)
+        amount = max(0, int(amount))
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            row = await self._fetchone(
+                connection,
+                """INSERT INTO economy_accounts
+                       (guild_id, user_id, balance, last_activity)
+                   VALUES (%s, %s, %s + %s, %s)
+                   ON CONFLICT (guild_id, user_id) DO UPDATE
+                   SET balance = economy_accounts.balance + EXCLUDED.balance - %s,
+                       last_activity = EXCLUDED.last_activity
+                   RETURNING balance""",
+                (guild_id, user_id, STARTING_BALANCE, amount, timestamp, STARTING_BALANCE),
+            )
+            return int(row["balance"])
+
+    async def credit_message_reward(self, guild_id: int, user_id: int, amount: int) -> int:
+        """Silently credit a buffered message reward without affecting rob activity."""
+        amount = max(0, int(amount))
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            row = await self._fetchone(
+                connection,
+                """INSERT INTO economy_accounts (guild_id, user_id, balance)
+                   VALUES (%s, %s, %s + %s)
+                   ON CONFLICT (guild_id, user_id) DO UPDATE
+                   SET balance = economy_accounts.balance + EXCLUDED.balance - %s
+                   RETURNING balance""",
+                (guild_id, user_id, STARTING_BALANCE, amount, STARTING_BALANCE),
+            )
+            return int(row["balance"])
+
+    async def start_activity(
+        self,
+        guild_id: int,
+        user_id: int,
+        activity: Literal["fish", "memory", "bounty"],
+        *,
+        now: Optional[int] = None,
+    ) -> ActivityStartResult:
+        """Atomically consume an activity cooldown before starting a game."""
+        settings = {
+            "fish": ("last_fish", FISH_COOLDOWN_SECONDS),
+            "memory": ("last_memory", MEMORY_COOLDOWN_SECONDS),
+            "bounty": ("last_bounty", BOUNTY_COOLDOWN_SECONDS),
+        }
+        column, cooldown = settings[activity]
+        timestamp = self._now(now)
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            await self._ensure_accounts(connection, guild_id, user_id)
+            row = await self._fetchone(
+                connection,
+                f"""SELECT balance, {column} AS last_used FROM economy_accounts
+                    WHERE guild_id = %s AND user_id = %s FOR UPDATE""",
+                (guild_id, user_id),
+            )
+            last_used = row["last_used"]
+            if last_used is not None:
+                retry_after = cooldown - (timestamp - int(last_used))
+                if retry_after > 0:
+                    await self._touch(connection, guild_id, user_id, timestamp)
+                    return ActivityStartResult(False, int(row["balance"]), retry_after)
+            await connection.execute(
+                f"""UPDATE economy_accounts SET {column} = %s, last_activity = %s
+                    WHERE guild_id = %s AND user_id = %s""",
+                (timestamp, timestamp, guild_id, user_id),
+            )
+            return ActivityStartResult(True, int(row["balance"]))
+
+    async def loan_status(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        now: Optional[int] = None,
+    ) -> LoanResult:
+        timestamp = self._now(now)
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            row = await self._fetchone(
+                connection,
+                """INSERT INTO economy_accounts (guild_id, user_id, last_activity)
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT (guild_id, user_id) DO UPDATE
+                   SET last_activity = EXCLUDED.last_activity
+                   RETURNING balance, loan_balance, loan_due""",
+                (guild_id, user_id, timestamp),
+            )
+            loan_balance = int(row["loan_balance"])
+            return LoanResult(
+                "active" if loan_balance else "none",
+                int(row["balance"]),
+                loan_balance,
+                None if row["loan_due"] is None else int(row["loan_due"]),
+            )
+
+    async def take_loan(
+        self,
+        guild_id: int,
+        user_id: int,
+        amount: int,
+        *,
+        now: Optional[int] = None,
+    ) -> LoanResult:
+        timestamp = self._now(now)
+        amount = int(amount)
+        if amount < 100 or amount > MAX_LOAN_AMOUNT:
+            status = await self.loan_status(guild_id, user_id, now=timestamp)
+            return LoanResult(
+                "invalid", status.balance, status.loan_balance, status.loan_due, amount
+            )
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            await self._ensure_accounts(connection, guild_id, user_id)
+            row = await self._fetchone(
+                connection,
+                """SELECT balance, loan_balance, loan_due FROM economy_accounts
+                   WHERE guild_id = %s AND user_id = %s FOR UPDATE""",
+                (guild_id, user_id),
+            )
+            if int(row["loan_balance"]):
+                await self._touch(connection, guild_id, user_id, timestamp)
+                return LoanResult(
+                    "active",
+                    int(row["balance"]),
+                    int(row["loan_balance"]),
+                    None if row["loan_due"] is None else int(row["loan_due"]),
+                )
+            due = timestamp + LOAN_TERM_SECONDS
+            updated = await self._fetchone(
+                connection,
+                """UPDATE economy_accounts
+                   SET balance = balance + %s, loan_balance = %s, loan_due = %s,
+                       last_activity = %s
+                   WHERE guild_id = %s AND user_id = %s
+                   RETURNING balance""",
+                (amount, amount, due, timestamp, guild_id, user_id),
+            )
+            return LoanResult("borrowed", int(updated["balance"]), amount, due, amount)
+
+    async def repay_loan(
+        self,
+        guild_id: int,
+        user_id: int,
+        amount: Optional[int] = None,
+        *,
+        now: Optional[int] = None,
+    ) -> LoanResult:
+        timestamp = self._now(now)
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            await self._ensure_accounts(connection, guild_id, user_id)
+            row = await self._fetchone(
+                connection,
+                """SELECT balance, loan_balance, loan_due FROM economy_accounts
+                   WHERE guild_id = %s AND user_id = %s FOR UPDATE""",
+                (guild_id, user_id),
+            )
+            balance = int(row["balance"])
+            loan_balance = int(row["loan_balance"])
+            loan_due = None if row["loan_due"] is None else int(row["loan_due"])
+            if not loan_balance:
+                await self._touch(connection, guild_id, user_id, timestamp)
+                return LoanResult("none", balance, 0, None)
+            requested = loan_balance if amount is None else int(amount)
+            if requested <= 0 or balance <= 0:
+                await self._touch(connection, guild_id, user_id, timestamp)
+                return LoanResult("invalid", balance, loan_balance, loan_due, requested)
+            payment = min(requested, balance, loan_balance)
+            loan_balance -= payment
+            balance -= payment
+            updated_due = loan_due if loan_balance else None
+            await connection.execute(
+                """UPDATE economy_accounts
+                   SET balance = %s, loan_balance = %s, loan_due = %s, last_activity = %s
+                   WHERE guild_id = %s AND user_id = %s""",
+                (balance, loan_balance, updated_due, timestamp, guild_id, user_id),
+            )
+            return LoanResult("repaid", balance, loan_balance, updated_due, payment)
 
     async def upgrade_security(
         self,
