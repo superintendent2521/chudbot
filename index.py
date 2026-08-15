@@ -6,6 +6,7 @@ from interactions import Client, Intents
 
 from command_handler import CommandHandler, CommandResources
 from guild_channel_store import GuildChannelStore
+from economy_store import DEFAULT_POSTGRES_URL, PostgresEconomyStore
 from music_runtime import MusicError, MusicRuntime
 from reaction_roles import (
     ReactionRoleStore,
@@ -82,6 +83,13 @@ voice_log_store = VoiceLogStore(
 gem_board_store = GuildChannelStore(GEM_BOARD_DATA_FILE, logger)
 coal_board_store = GuildChannelStore(COAL_BOARD_DATA_FILE, logger)
 audit_log_store = GuildChannelStore(AUDIT_LOG_DATA_FILE, logger)
+economy_store = PostgresEconomyStore(
+    os.getenv("ECONOMY_DATABASE_URL")
+    or os.getenv("DATABASE_URL")
+    or DEFAULT_POSTGRES_URL,
+    min_pool_size=int(os.getenv("ECONOMY_DB_POOL_MIN", "5")),
+    max_pool_size=int(os.getenv("ECONOMY_DB_POOL_MAX", "10")),
+)
 music_runtime = MusicRuntime(
     logger=logger,
     lavalink_host=LAVALINK_HOST,
@@ -129,6 +137,7 @@ command_resources = CommandResources(
     gem_board_store=gem_board_store,
     coal_board_store=coal_board_store,
     audit_log_store=audit_log_store,
+    economy_store=economy_store,
 )
 command_handler = CommandHandler(bot, command_resources)
 command_handler.load_from_package("commands")

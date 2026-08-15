@@ -232,6 +232,8 @@ def _get_playing_music_channel_count(lavalink_client: Any) -> int:
 def setup(handler: CommandHandler) -> None:
     bot = handler.bot
     get_lavalink_client = handler.resources.get_lavalink_client
+    economy_store = handler.resources.economy_store
+    logger = handler.resources.logger
 
     @slash_command(name="statistics", description="Show bot statistics")
     async def statistics_command(ctx: SlashContext):
@@ -239,6 +241,21 @@ def setup(handler: CommandHandler) -> None:
         total_users = sum(_get_member_count(guild) for guild in guilds)
         total_channels = _get_total_channels(bot, guilds)
         playing_music_channels = _get_playing_music_channel_count(get_lavalink_client())
+
+        try:
+            economy = await economy_store.statistics()
+            economy_lines = [
+                "",
+                "**Economy Statistics**",
+                f"Participating servers: {economy.guilds:,}",
+                f"Accounts: {economy.accounts:,}",
+                f"Coins in circulation: {economy.total_balance:,}",
+                f"Average balance: {economy.average_balance:,}",
+                f"Highest balance: {economy.highest_balance:,}",
+            ]
+        except Exception as error:
+            logger.warning("Unable to load economy statistics: %s", error)
+            economy_lines = ["", "**Economy Statistics**", "Currently unavailable"]
 
         lines = [
             "**Bot Statistics**",
@@ -249,6 +266,7 @@ def setup(handler: CommandHandler) -> None:
             f"Playing music in {playing_music_channels:,} channels",
             f"Ping: {_format_ping(bot)}",
         ]
+        lines.extend(economy_lines)
         await ctx.send("\n".join(lines))
 
     handler.register_slash_command(statistics_command)

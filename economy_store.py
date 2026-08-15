@@ -102,6 +102,15 @@ class SecurityUpgradeResult:
     protection_percent: float
 
 
+@dataclass(frozen=True)
+class EconomyStatistics:
+    guilds: int
+    accounts: int
+    total_balance: int
+    average_balance: int
+    highest_balance: int
+
+
 class PostgresEconomyStore:
     """Async PostgreSQL economy store backed by a reusable connection pool."""
 
@@ -294,6 +303,28 @@ class PostgresEconomyStore:
                 int(rows[0]["user_balance"]),
             )
 
+    async def statistics(self) -> EconomyStatistics:
+        """Return global economy totals in one aggregate query."""
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            row = await self._fetchone(
+                connection,
+                """SELECT COUNT(DISTINCT guild_id) AS guilds,
+                          COUNT(*) AS accounts,
+                          COALESCE(SUM(balance), 0) AS total_balance,
+                          COALESCE(ROUND(AVG(balance)), 0) AS average_balance,
+                          COALESCE(MAX(balance), 0) AS highest_balance
+                   FROM economy_accounts""",
+                (),
+            )
+            return EconomyStatistics(
+                guilds=int(row["guilds"]),
+                accounts=int(row["accounts"]),
+                total_balance=int(row["total_balance"]),
+                average_balance=int(row["average_balance"]),
+                highest_balance=int(row["highest_balance"]),
+            )
+
     async def work(
         self,
         guild_id: int,
@@ -425,6 +456,31 @@ class PostgresEconomyStore:
                 )
             accepted = bool(row["accepted"])
             return WagerResult(accepted, amount, profit if accepted else 0, int(row["balance"]))
+
+    async def pay_reserved_wager(
+        self,
+        guild_id: int,
+        user_id: int,
+        payout: int,
+        *,
+        now: Optional[int] = None,
+    ) -> int:
+        """Credit the payout for a wager that was deducted before interactive play."""
+        timestamp = self._now(now)
+        payout = max(0, int(payout))
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            row = await self._fetchone(
+                connection,
+                """UPDATE economy_accounts
+                   SET balance = balance + %s, last_activity = %s
+                   WHERE guild_id = %s AND user_id = %s
+                   RETURNING balance""",
+                (payout, timestamp, guild_id, user_id),
+            )
+            if row is None:
+                raise RuntimeError("Reserved wager account no longer exists")
+            return int(row["balance"])
 
     async def upgrade_security(
         self,

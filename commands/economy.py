@@ -2,19 +2,30 @@
 
 from __future__ import annotations
 
-import os
+import asyncio
 import random
-from typing import Optional
+import secrets
+from typing import Any, Optional
 
-from interactions import Member, OptionType, SlashContext, listen, slash_command, slash_option
+from interactions import (
+    Button,
+    ButtonStyle,
+    Member,
+    Modal,
+    OptionType,
+    ShortText,
+    SlashContext,
+    listen,
+    slash_command,
+    slash_option,
+)
 from interactions.api.events import WebsocketReady
 
+from blackjack_game import hand_value, new_game, play_dealer, profit as blackjack_profit
 from command_handler import CommandHandler
 from economy_store import (
     BASE_ROB_SUCCESS_PERCENT,
-    DEFAULT_POSTGRES_URL,
     MAX_SECURITY_LEVEL,
-    PostgresEconomyStore,
     rob_success_chance,
 )
 
@@ -40,6 +51,24 @@ def _format_wait(seconds: int) -> str:
     return f"{remaining}s"
 
 
+def _blackjack_table(
+    mention: str,
+    player_hand: list[str],
+    dealer_hand: list[str],
+    *,
+    reveal_dealer: bool,
+    footer: str,
+) -> str:
+    dealer_cards = " ".join(dealer_hand) if reveal_dealer else f"{dealer_hand[0]} ??"
+    dealer_score = f" (**{hand_value(dealer_hand)}**)" if reveal_dealer else ""
+    return (
+        f"{mention} 🃏 **Blackjack**\n"
+        f"Dealer: `{dealer_cards}`{dealer_score}\n"
+        f"Your hand: `{' '.join(player_hand)}` (**{hand_value(player_hand)}**)\n"
+        f"{footer}"
+    )
+
+
 def _guild_id(ctx: SlashContext) -> Optional[int]:
     raw_id = getattr(ctx, "guild_id", None)
     if raw_id is None:
@@ -56,16 +85,7 @@ async def _require_guild(ctx: SlashContext) -> Optional[int]:
 
 
 def setup(handler: CommandHandler) -> None:
-    database_url = (
-        os.getenv("ECONOMY_DATABASE_URL")
-        or os.getenv("DATABASE_URL")
-        or DEFAULT_POSTGRES_URL
-    )
-    store = PostgresEconomyStore(
-        database_url,
-        min_pool_size=int(os.getenv("ECONOMY_DB_POOL_MIN", "5")),
-        max_pool_size=int(os.getenv("ECONOMY_DB_POOL_MAX", "10")),
-    )
+    store = handler.resources.economy_store
 
     @listen(WebsocketReady)
     async def open_economy_pool(_: WebsocketReady) -> None:
@@ -295,6 +315,167 @@ def setup(handler: CommandHandler) -> None:
             f"Balance: **{_format_coins(result.balance)}**."
         )
 
+    @slash_command(name="blackjack", description="Play interactive blackjack")
+    async def blackjack_command(ctx: SlashContext):
+        guild_id = await _require_guild(ctx)
+        if guild_id is None:
+            return
+        game_id = secrets.token_hex(8)
+        wager_modal = Modal(
+            ShortText(
+                label="Wager",
+                custom_id="wager",
+                placeholder="Minimum 10 coins",
+                min_length=1,
+                max_length=18,
+            ),
+            title="Blackjack",
+            custom_id=f"blackjack_wager_{game_id}",
+        )
+        await ctx.send_modal(wager_modal)
+        try:
+            game_ctx = await handler.bot.wait_for_modal(
+                wager_modal,
+                author=ctx.author.id,
+                timeout=60,
+            )
+        except asyncio.TimeoutError:
+            return
+
+        raw_amount = game_ctx.responses["wager"].replace(",", "").strip()
+        try:
+            amount = int(raw_amount)
+        except ValueError:
+            await game_ctx.send("Enter a whole number of coins.", ephemeral=True)
+            return
+
+        mention = game_ctx.author.mention
+        if amount < MINIMUM_WAGER:
+            await store.balance(guild_id, int(ctx.author.id))
+            await game_ctx.send(
+                f"{mention} The minimum wager is **{_format_coins(MINIMUM_WAGER)}**.",
+                ephemeral=True,
+            )
+            return
+
+        player_id = int(ctx.author.id)
+        reserved = await store.settle_wager(
+            guild_id,
+            player_id,
+            amount,
+            profit=-amount,
+        )
+        if not reserved.accepted:
+            await game_ctx.send(
+                f"{mention} You can't bet {_format_coins(amount)}. Your balance is "
+                f"**{_format_coins(reserved.balance)}**.",
+                ephemeral=True,
+            )
+            return
+
+        deck, player_hand, dealer_hand = new_game(_random)
+
+        async def finish_game(*, timed_out: bool = False) -> str:
+            player_value = hand_value(player_hand)
+            has_natural = len(player_hand) == 2 and player_value == 21
+            dealer_has_natural = len(dealer_hand) == 2 and hand_value(dealer_hand) == 21
+            if player_value <= 21 and not has_natural and not dealer_has_natural:
+                play_dealer(deck, dealer_hand)
+            net_profit, outcome = blackjack_profit(player_hand, dealer_hand, amount)
+            payout = amount + net_profit
+            balance = await store.pay_reserved_wager(guild_id, player_id, payout)
+            if net_profit > 0:
+                change = f"You gained **{_format_coins(net_profit)}**."
+            elif net_profit < 0:
+                change = f"You lost **{_format_coins(-net_profit)}**."
+            else:
+                change = "Your wager was returned."
+            timeout_text = "Time expired, so you stood. " if timed_out else ""
+            return _blackjack_table(
+                mention,
+                player_hand,
+                dealer_hand,
+                reveal_dealer=True,
+                footer=(
+                    f"{timeout_text}{outcome} {change} "
+                    f"Balance: **{_format_coins(balance)}**."
+                ),
+            )
+
+        player_natural = len(player_hand) == 2 and hand_value(player_hand) == 21
+        dealer_natural = len(dealer_hand) == 2 and hand_value(dealer_hand) == 21
+        if player_natural or dealer_natural:
+            await game_ctx.send(await finish_game())
+            return
+
+        hit_button = Button(
+            custom_id=f"blackjack_hit_{game_id}",
+            style=ButtonStyle.GREEN,
+            label="Hit",
+            emoji="🃏",
+        )
+        stand_button = Button(
+            custom_id=f"blackjack_stand_{game_id}",
+            style=ButtonStyle.RED,
+            label="Stand",
+            emoji="✋",
+        )
+        buttons = [hit_button, stand_button]
+        message = await game_ctx.send(
+            _blackjack_table(
+                mention,
+                player_hand,
+                dealer_hand,
+                reveal_dealer=False,
+                footer=f"Wager: **{_format_coins(amount)}**. Choose **Hit** or **Stand**.",
+            ),
+            components=buttons,
+        )
+
+        async def is_player(component: Any) -> bool:
+            component_author = getattr(component.ctx, "author", None)
+            component_author_id = getattr(component_author, "id", None)
+            if component_author_id is not None and int(component_author_id) == player_id:
+                return True
+            await component.ctx.send("This isn't your blackjack hand.", ephemeral=True)
+            return False
+
+        while True:
+            try:
+                component = await handler.bot.wait_for_component(
+                    components=buttons,
+                    check=is_player,
+                    timeout=60,
+                )
+            except asyncio.TimeoutError:
+                hit_button.disabled = True
+                stand_button.disabled = True
+                await message.edit(content=await finish_game(timed_out=True), components=buttons)
+                return
+
+            if component.ctx.custom_id == hit_button.custom_id:
+                player_hand.append(deck.pop())
+                if hand_value(player_hand) < 21:
+                    await component.ctx.edit_origin(
+                        content=_blackjack_table(
+                            mention,
+                            player_hand,
+                            dealer_hand,
+                            reveal_dealer=False,
+                            footer=(
+                                f"Wager: **{_format_coins(amount)}**. "
+                                "Choose **Hit** or **Stand**."
+                            ),
+                        ),
+                        components=buttons,
+                    )
+                    continue
+
+            hit_button.disabled = True
+            stand_button.disabled = True
+            await component.ctx.edit_origin(content=await finish_game(), components=buttons)
+            return
+
     @slash_command(name="rob", description="Try to rob a recently active economy user")
     @slash_option(
         name="user",
@@ -434,6 +615,7 @@ def setup(handler: CommandHandler) -> None:
     handler.register_slash_command(gamble_command)
     handler.register_slash_command(slots_command)
     handler.register_slash_command(roulette_command)
+    handler.register_slash_command(blackjack_command)
     handler.register_slash_command(rob_command)
     handler.register_slash_command(security_command)
     handler.register_slash_command(gift_command)

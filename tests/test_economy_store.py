@@ -15,8 +15,10 @@ class EconomySecurityTests(unittest.TestCase):
         for method_name in (
             "balance",
             "leaderboard",
+            "statistics",
             "work",
             "settle_wager",
+            "pay_reserved_wager",
             "upgrade_security",
             "gift",
             "rob",
