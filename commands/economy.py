@@ -316,7 +316,7 @@ def setup(handler: CommandHandler) -> None:
             robber_id,
             target_id,
             succeeded=_random.random() < 0.45,
-            steal_percent=_random.randint(10, 30),
+            steal_percent=_random.randint(3, 8),
             fine_percent=_random.randint(5, 15),
         )
         if result.status == "cooldown":
