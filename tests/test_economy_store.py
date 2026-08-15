@@ -4,9 +4,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from economy_store import (
-    EconomyStore,
     ROB_ACTIVITY_WINDOW_SECONDS,
     ROB_COOLDOWN_SECONDS,
+    SQLiteEconomyStore,
     STARTING_BALANCE,
     WORK_COOLDOWN_SECONDS,
 )
@@ -15,7 +15,7 @@ from economy_store import (
 class EconomyStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.store = EconomyStore(Path(self.temp_dir.name) / "economy.db")
+        self.store = SQLiteEconomyStore(Path(self.temp_dir.name) / "economy.db")
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -46,6 +46,24 @@ class EconomyStoreTests(unittest.TestCase):
 
     def test_gambling_cannot_overdraw(self) -> None:
         result = self.store.gamble(1, 10, STARTING_BALANCE + 1, True, now=100)
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.balance, STARTING_BALANCE)
+
+    def test_wager_supports_custom_payouts(self) -> None:
+        jackpot = self.store.settle_wager(1, 10, 25, profit=250, now=100)
+        loss = self.store.settle_wager(1, 10, 50, profit=-50, now=101)
+
+        self.assertTrue(jackpot.accepted)
+        self.assertEqual(jackpot.profit, 250)
+        self.assertEqual(loss.balance, STARTING_BALANCE + 200)
+
+    def test_wager_cannot_lose_more_than_the_stake(self) -> None:
+        with self.assertRaises(ValueError):
+            self.store.settle_wager(1, 10, 25, profit=-26, now=100)
+
+    def test_non_positive_wager_is_rejected(self) -> None:
+        result = self.store.gamble(1, 10, -10, True, now=100)
+
         self.assertFalse(result.accepted)
         self.assertEqual(result.balance, STARTING_BALANCE)
 
