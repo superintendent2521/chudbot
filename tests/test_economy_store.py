@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from economy_store import (
@@ -116,6 +117,18 @@ class EconomyStoreTests(unittest.TestCase):
 
         self.assertEqual([entry.user_id for entry in result.entries], [10, 20])
         self.assertEqual(result.user_rank, 2)
+
+    def test_concurrent_writes_remain_atomic(self) -> None:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(
+                executor.map(
+                    lambda _: self.store.gamble(1, 10, 10, False, now=100),
+                    range(20),
+                )
+            )
+
+        self.assertTrue(all(result.accepted for result in results))
+        self.assertEqual(self.store.peek_balance(1, 10), STARTING_BALANCE - 200)
 
 
 if __name__ == "__main__":

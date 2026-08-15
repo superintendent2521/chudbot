@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import random
 from pathlib import Path
@@ -61,12 +62,12 @@ def setup(handler: CommandHandler) -> None:
         if guild_id is None:
             return
         viewer_id = int(ctx.author.id)
-        viewer_balance = store.balance(guild_id, viewer_id)
+        viewer_balance = await asyncio.to_thread(store.balance, guild_id, viewer_id)
         subject = user or ctx.author
         if int(subject.id) == viewer_id:
             amount = viewer_balance
         else:
-            amount = store.peek_balance(guild_id, int(subject.id))
+            amount = await asyncio.to_thread(store.peek_balance, guild_id, int(subject.id))
             if amount is None:
                 await ctx.send(f"{subject.mention} hasn't joined the economy yet.")
                 return
@@ -77,7 +78,7 @@ def setup(handler: CommandHandler) -> None:
         guild_id = await _require_guild(ctx)
         if guild_id is None:
             return
-        result = store.leaderboard(guild_id, int(ctx.author.id), limit=10)
+        result = await asyncio.to_thread(store.leaderboard, guild_id, int(ctx.author.id), limit=10)
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
         lines = [
             f"{medals.get(entry.rank, f'**#{entry.rank}**')} <@{entry.user_id}> — "
@@ -92,13 +93,13 @@ def setup(handler: CommandHandler) -> None:
         )
         await ctx.send("🏆 **Economy Leaderboard**\n" + "\n".join(lines))
 
-    @slash_command(name="work", description="Work for coins (30-minute cooldown)")
+    @slash_command(name="work", description="Work for coins (3-minute cooldown)")
     async def work_command(ctx: SlashContext):
         guild_id = await _require_guild(ctx)
         if guild_id is None:
             return
         reward = _random.randint(WORK_REWARD_MIN, WORK_REWARD_MAX)
-        result = store.work(guild_id, int(ctx.author.id), reward)
+        result = await asyncio.to_thread(store.work, guild_id, int(ctx.author.id), reward)
         if result.retry_after:
             await ctx.send(
                 f"⏳ You're tired. You can work again in **{_format_wait(result.retry_after)}**.",
@@ -123,13 +124,19 @@ def setup(handler: CommandHandler) -> None:
             return
         mention = ctx.author.mention
         if amount < MINIMUM_WAGER:
-            store.balance(guild_id, int(ctx.author.id))
+            await asyncio.to_thread(store.balance, guild_id, int(ctx.author.id))
             await ctx.send(
                 f"{mention} The minimum wager is **{_format_coins(MINIMUM_WAGER)}**.",
                 ephemeral=True,
             )
             return
-        result = store.gamble(guild_id, int(ctx.author.id), amount, _random.random() < 0.5)
+        result = await asyncio.to_thread(
+            store.gamble,
+            guild_id,
+            int(ctx.author.id),
+            amount,
+            _random.random() < 0.5,
+        )
         if not result.accepted:
             await ctx.send(
                 f"{mention} You can't bet {_format_coins(amount)}. Your balance is "
@@ -162,15 +169,16 @@ def setup(handler: CommandHandler) -> None:
         robber_id = int(ctx.author.id)
         target_id = int(user.id)
         if target_id == robber_id:
-            store.balance(guild_id, robber_id)
+            await asyncio.to_thread(store.balance, guild_id, robber_id)
             await ctx.send("You can't rob yourself.", ephemeral=True)
             return
         if bool(getattr(user, "bot", False)):
-            store.balance(guild_id, robber_id)
+            await asyncio.to_thread(store.balance, guild_id, robber_id)
             await ctx.send("You can't rob a bot.", ephemeral=True)
             return
 
-        result = store.rob(
+        result = await asyncio.to_thread(
+            store.rob,
             guild_id,
             robber_id,
             target_id,

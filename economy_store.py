@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sqlite3
-import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -12,7 +11,7 @@ from typing import Iterator, Literal, Optional
 
 
 STARTING_BALANCE = 250
-WORK_COOLDOWN_SECONDS = 30 * 60
+WORK_COOLDOWN_SECONDS = 3 * 60
 ROB_COOLDOWN_SECONDS = 10 * 60
 ROB_ACTIVITY_WINDOW_SECONDS = 15 * 60
 
@@ -60,12 +59,13 @@ class EconomyStore:
 
     def __init__(self, database_path: str | Path) -> None:
         self.database_path = str(database_path)
-        self._lock = threading.RLock()
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=10)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 10000")
+        connection.execute("PRAGMA synchronous = NORMAL")
         return connection
 
     @contextmanager
@@ -79,7 +79,7 @@ class EconomyStore:
 
     def _initialize(self) -> None:
         Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
-        with self._lock, self._connection() as connection:
+        with self._connection() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute(
                 """
@@ -93,6 +93,10 @@ class EconomyStore:
                     PRIMARY KEY (guild_id, user_id)
                 )
                 """
+            )
+            connection.execute(
+                """CREATE INDEX IF NOT EXISTS economy_leaderboard_idx
+                   ON economy_accounts (guild_id, balance DESC, user_id ASC)"""
             )
 
     @staticmethod
@@ -119,7 +123,7 @@ class EconomyStore:
     def balance(self, guild_id: int, user_id: int, *, now: Optional[int] = None) -> int:
         """Return a balance and record that this user used an economy command."""
         timestamp = self._now(now)
-        with self._lock, self._connection() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._ensure_account(connection, guild_id, user_id)
             connection.execute(
@@ -130,7 +134,7 @@ class EconomyStore:
 
     def peek_balance(self, guild_id: int, user_id: int) -> Optional[int]:
         """Read a balance without marking the viewed user active."""
-        with self._lock, self._connection() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT balance FROM economy_accounts WHERE guild_id = ? AND user_id = ?",
                 (guild_id, user_id),
@@ -148,7 +152,7 @@ class EconomyStore:
         """Return the guild's richest accounts and the requesting user's rank."""
         timestamp = self._now(now)
         limit = max(1, int(limit))
-        with self._lock, self._connection() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._ensure_account(connection, guild_id, user_id)
             connection.execute(
@@ -168,14 +172,18 @@ class EconomyStore:
                 LeaderboardEntry(rank, int(row["user_id"]), int(row["balance"]))
                 for rank, row in enumerate(rows, start=1)
             )
-            higher_accounts = connection.execute(
-                """SELECT COUNT(*)
-                   FROM economy_accounts
-                   WHERE guild_id = ?
-                     AND (balance > ? OR (balance = ? AND user_id < ?))""",
-                (guild_id, user_balance, user_balance, user_id),
+            richer_accounts = connection.execute(
+                """SELECT COUNT(*) FROM economy_accounts
+                   WHERE guild_id = ? AND balance > ?""",
+                (guild_id, user_balance),
             ).fetchone()[0]
-            return LeaderboardResult(entries, int(higher_accounts) + 1, user_balance)
+            earlier_ties = connection.execute(
+                """SELECT COUNT(*) FROM economy_accounts
+                   WHERE guild_id = ? AND balance = ? AND user_id < ?""",
+                (guild_id, user_balance, user_id),
+            ).fetchone()[0]
+            user_rank = int(richer_accounts) + int(earlier_ties) + 1
+            return LeaderboardResult(entries, user_rank, user_balance)
 
     def work(
         self,
@@ -187,7 +195,7 @@ class EconomyStore:
     ) -> WorkResult:
         timestamp = self._now(now)
         reward = max(0, int(reward))
-        with self._lock, self._connection() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._ensure_account(connection, guild_id, user_id)
             row = self._row(connection, guild_id, user_id)
@@ -221,7 +229,7 @@ class EconomyStore:
     ) -> GambleResult:
         timestamp = self._now(now)
         amount = int(amount)
-        with self._lock, self._connection() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._ensure_account(connection, guild_id, user_id)
             row = self._row(connection, guild_id, user_id)
@@ -253,7 +261,7 @@ class EconomyStore:
     ) -> RobResult:
         """Attempt a robbery, requiring recent target activity in this guild."""
         timestamp = self._now(now)
-        with self._lock, self._connection() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._ensure_account(connection, guild_id, robber_id)
             robber = self._row(connection, guild_id, robber_id)
