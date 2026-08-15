@@ -342,6 +342,54 @@ def setup(handler: CommandHandler) -> None:
                 f"Balance: **{_format_coins(result.robber_balance)}**."
             )
 
+    @slash_command(name="gift", description="Give coins to another user")
+    @slash_option(
+        name="user",
+        description="User to give coins to",
+        required=True,
+        opt_type=OptionType.USER,
+    )
+    @slash_option(
+        name="amount",
+        description="Number of coins to give (minimum 1)",
+        required=True,
+        opt_type=OptionType.INTEGER,
+    )
+    async def gift_command(ctx: SlashContext, user: Member, amount: int):
+        guild_id = await _require_guild(ctx)
+        if guild_id is None:
+            return
+        giver_id = int(ctx.author.id)
+        recipient_id = int(user.id)
+        if recipient_id == giver_id:
+            await asyncio.to_thread(store.balance, guild_id, giver_id)
+            await ctx.send("You can't gift coins to yourself.", ephemeral=True)
+            return
+        if amount < 1:
+            await asyncio.to_thread(store.balance, guild_id, giver_id)
+            await ctx.send("You must gift at least 1 coin.", ephemeral=True)
+            return
+
+        result = await asyncio.to_thread(
+            store.gift,
+            guild_id,
+            giver_id,
+            recipient_id,
+            amount,
+        )
+        if not result.accepted:
+            await ctx.send(
+                f"You can't gift {_format_coins(amount)}. Your balance is "
+                f"**{_format_coins(result.giver_balance)}**.",
+                ephemeral=True,
+            )
+            return
+        await ctx.send(
+            f"🎁 You gifted **{_format_coins(result.amount)}** to {user.mention}. "
+            f"Your balance: **{_format_coins(result.giver_balance)}**."
+        )
+    
+
     handler.register_slash_command(balance_command)
     handler.register_slash_command(leaderboard_command)
     handler.register_slash_command(work_command)

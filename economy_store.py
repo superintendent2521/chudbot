@@ -323,7 +323,7 @@ class SQLiteEconomyStore:
 
             if succeeded:
                 amount = max(1, target_balance * max(1, steal_percent) // 100)
-                amount = min(amount, target_balance, 500)
+                amount = min(amount, target_balance)
                 robber_balance += amount
                 target_balance -= amount
                 status: Literal["success", "caught"] = "success"
@@ -627,7 +627,7 @@ class PostgresEconomyStore:
 
             if succeeded:
                 amount = max(1, target_balance * max(1, steal_percent) // 100)
-                amount = min(amount, target_balance, 500)
+                amount = min(amount, target_balance)
                 robber_balance += amount
                 target_balance -= amount
                 status: Literal["success", "caught"] = "success"

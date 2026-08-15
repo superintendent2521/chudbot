@@ -96,6 +96,17 @@ class EconomyStoreTests(unittest.TestCase):
         self.assertEqual(blocked.status, "cooldown")
         self.assertEqual(blocked.retry_after, ROB_COOLDOWN_SECONDS - 1)
 
+    def test_successful_robbery_has_no_coin_cap(self) -> None:
+        self.store.work(1, 20, 10_000, now=100)
+
+        result = self.store.rob(
+            1, 10, 20, succeeded=True, steal_percent=20, fine_percent=10, now=101
+        )
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.amount, 2_050)
+        self.assertEqual(result.target_balance, 8_200)
+
     def test_failed_robbery_pays_fine_to_target(self) -> None:
         self.store.balance(1, 20, now=100)
         result = self.store.rob(
