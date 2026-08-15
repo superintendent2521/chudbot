@@ -41,6 +41,20 @@ class RobResult:
     retry_after: int = 0
 
 
+@dataclass(frozen=True)
+class LeaderboardEntry:
+    rank: int
+    user_id: int
+    balance: int
+
+
+@dataclass(frozen=True)
+class LeaderboardResult:
+    entries: tuple[LeaderboardEntry, ...]
+    user_rank: int
+    user_balance: int
+
+
 class EconomyStore:
     """Stores balances per guild and applies money changes atomically."""
 
@@ -122,6 +136,46 @@ class EconomyStore:
                 (guild_id, user_id),
             ).fetchone()
             return None if row is None else int(row["balance"])
+
+    def leaderboard(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        limit: int = 10,
+        now: Optional[int] = None,
+    ) -> LeaderboardResult:
+        """Return the guild's richest accounts and the requesting user's rank."""
+        timestamp = self._now(now)
+        limit = max(1, int(limit))
+        with self._lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._ensure_account(connection, guild_id, user_id)
+            connection.execute(
+                "UPDATE economy_accounts SET last_activity = ? WHERE guild_id = ? AND user_id = ?",
+                (timestamp, guild_id, user_id),
+            )
+            user_balance = int(self._row(connection, guild_id, user_id)["balance"])
+            rows = connection.execute(
+                """SELECT user_id, balance
+                   FROM economy_accounts
+                   WHERE guild_id = ?
+                   ORDER BY balance DESC, user_id ASC
+                   LIMIT ?""",
+                (guild_id, limit),
+            ).fetchall()
+            entries = tuple(
+                LeaderboardEntry(rank, int(row["user_id"]), int(row["balance"]))
+                for rank, row in enumerate(rows, start=1)
+            )
+            higher_accounts = connection.execute(
+                """SELECT COUNT(*)
+                   FROM economy_accounts
+                   WHERE guild_id = ?
+                     AND (balance > ? OR (balance = ? AND user_id < ?))""",
+                (guild_id, user_balance, user_balance, user_id),
+            ).fetchone()[0]
+            return LeaderboardResult(entries, int(higher_accounts) + 1, user_balance)
 
     def work(
         self,

@@ -72,6 +72,26 @@ def setup(handler: CommandHandler) -> None:
                 return
         await ctx.send(f"💰 {subject.mention} has **{_format_coins(amount)}**.")
 
+    @slash_command(name="leaderboard", description="See the server's 10 richest economy users")
+    async def leaderboard_command(ctx: SlashContext):
+        guild_id = await _require_guild(ctx)
+        if guild_id is None:
+            return
+        result = store.leaderboard(guild_id, int(ctx.author.id), limit=10)
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+        lines = [
+            f"{medals.get(entry.rank, f'**#{entry.rank}**')} <@{entry.user_id}> — "
+            f"**{_format_coins(entry.balance)}**"
+            for entry in result.entries
+        ]
+        lines.extend(
+            (
+                "",
+                f"Your rank: **#{result.user_rank}** — **{_format_coins(result.user_balance)}**",
+            )
+        )
+        await ctx.send("🏆 **Economy Leaderboard**\n" + "\n".join(lines))
+
     @slash_command(name="work", description="Work for coins (30-minute cooldown)")
     async def work_command(ctx: SlashContext):
         guild_id = await _require_guild(ctx)
@@ -101,26 +121,30 @@ def setup(handler: CommandHandler) -> None:
         guild_id = await _require_guild(ctx)
         if guild_id is None:
             return
+        mention = ctx.author.mention
         if amount < MINIMUM_WAGER:
             store.balance(guild_id, int(ctx.author.id))
-            await ctx.send(f"The minimum wager is **{_format_coins(MINIMUM_WAGER)}**.", ephemeral=True)
+            await ctx.send(
+                f"{mention} The minimum wager is **{_format_coins(MINIMUM_WAGER)}**.",
+                ephemeral=True,
+            )
             return
         result = store.gamble(guild_id, int(ctx.author.id), amount, _random.random() < 0.5)
         if not result.accepted:
             await ctx.send(
-                f"You can't bet {_format_coins(amount)}. Your balance is "
+                f"{mention} You can't bet {_format_coins(amount)}. Your balance is "
                 f"**{_format_coins(result.balance)}**.",
                 ephemeral=True,
             )
             return
         if result.won:
             await ctx.send(
-                f"🎰 **You won!** You gained {_format_coins(amount)}. "
+                f"{mention} 🎰 **You won!** You gained {_format_coins(amount)}. "
                 f"Balance: **{_format_coins(result.balance)}**."
             )
         else:
             await ctx.send(
-                f"🎰 You lost **{_format_coins(amount)}**. "
+                f"{mention} 🎰 You lost **{_format_coins(amount)}**. "
                 f"Balance: **{_format_coins(result.balance)}**."
             )
 
@@ -178,6 +202,7 @@ def setup(handler: CommandHandler) -> None:
             )
 
     handler.register_slash_command(balance_command)
+    handler.register_slash_command(leaderboard_command)
     handler.register_slash_command(work_command)
     handler.register_slash_command(gamble_command)
     handler.register_slash_command(rob_command)

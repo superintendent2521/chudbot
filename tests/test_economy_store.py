@@ -95,6 +95,28 @@ class EconomyStoreTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "inactive")
 
+    def test_leaderboard_returns_top_ten_and_requesting_user_rank(self) -> None:
+        for user_id in range(1, 13):
+            self.store.work(1, user_id, user_id * 10, now=100)
+
+        result = self.store.leaderboard(1, 2, now=200)
+
+        self.assertEqual(len(result.entries), 10)
+        self.assertEqual([entry.user_id for entry in result.entries], list(range(12, 2, -1)))
+        self.assertEqual([entry.rank for entry in result.entries], list(range(1, 11)))
+        self.assertEqual(result.user_rank, 11)
+        self.assertEqual(result.user_balance, STARTING_BALANCE + 20)
+
+    def test_leaderboard_is_guild_scoped_and_orders_ties_by_user_id(self) -> None:
+        self.store.balance(1, 20, now=100)
+        self.store.balance(1, 10, now=100)
+        self.store.work(2, 99, 1_000, now=100)
+
+        result = self.store.leaderboard(1, 20, now=200)
+
+        self.assertEqual([entry.user_id for entry in result.entries], [10, 20])
+        self.assertEqual(result.user_rank, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
