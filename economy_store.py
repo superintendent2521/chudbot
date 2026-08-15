@@ -14,7 +14,7 @@ STARTING_BALANCE = 250
 WORK_COOLDOWN_SECONDS = 3 * 60
 ROB_COOLDOWN_SECONDS = 10 * 60
 ROB_ACTIVITY_WINDOW_SECONDS = 15 * 60
-DEFAULT_POSTGRES_URL = "postgresql://postgres@postgres/postgres"
+DEFAULT_POSTGRES_URL = "postgresql://postgres:postgres@postgres/economy"
 
 
 @dataclass(frozen=True)
