@@ -1,13 +1,11 @@
-"""Persistent, transaction-safe storage for the guild economy."""
+"""Asynchronous, transaction-safe PostgreSQL storage for the guild economy."""
 
 from __future__ import annotations
 
-import sqlite3
+import asyncio
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Iterable, Iterator, Literal, Optional, Sequence
+from typing import Any, Literal, Optional
 
 
 STARTING_BALANCE = 250
@@ -15,6 +13,30 @@ WORK_COOLDOWN_SECONDS = 3 * 60
 ROB_COOLDOWN_SECONDS = 10 * 60
 ROB_ACTIVITY_WINDOW_SECONDS = 15 * 60
 DEFAULT_POSTGRES_URL = "postgresql://postgres:postgres@postgres/economy"
+BASE_ROB_SUCCESS_PERCENT = 45.0
+MAX_SECURITY_LEVEL = 20
+BASE_SECURITY_PROTECTION_PERCENT = 5.0
+SECURITY_PROTECTION_GROWTH = 1.05
+
+
+def security_protection_percent(level: int) -> float:
+    """Return the percentage-point robbery penalty for a security tier."""
+    level = min(MAX_SECURITY_LEVEL, max(0, int(level)))
+    if level == 0:
+        return 0.0
+    return BASE_SECURITY_PROTECTION_PERCENT * SECURITY_PROTECTION_GROWTH ** (level - 1)
+
+
+def rob_success_chance(level: int) -> float:
+    """Return a robber's success probability against the given security tier."""
+    protection = security_protection_percent(level)
+    return max(0.0, (BASE_ROB_SUCCESS_PERCENT - protection) / 100.0)
+
+
+def security_upgrade_cost(level: int) -> int:
+    """Return the cost of purchasing a specific security tier."""
+    level = min(MAX_SECURITY_LEVEL, max(1, int(level)))
+    return 500 * level * level
 
 
 @dataclass(frozen=True)
@@ -41,6 +63,14 @@ class WagerResult:
 
 
 @dataclass(frozen=True)
+class GiftResult:
+    accepted: bool
+    amount: int
+    giver_balance: int
+    recipient_balance: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class RobResult:
     status: Literal["success", "caught", "inactive", "broke", "cooldown"]
     amount: int
@@ -63,305 +93,30 @@ class LeaderboardResult:
     user_balance: int
 
 
-class SQLiteEconomyStore:
-    """Legacy SQLite store, retained for data migration and isolated tests."""
-
-    def __init__(self, database_path: str | Path) -> None:
-        self.database_path = str(database_path)
-        self._initialize()
-
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path, timeout=10)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout = 10000")
-        connection.execute("PRAGMA synchronous = NORMAL")
-        return connection
-
-    @contextmanager
-    def _connection(self) -> Iterator[sqlite3.Connection]:
-        connection = self._connect()
-        try:
-            with connection:
-                yield connection
-        finally:
-            connection.close()
-
-    def _initialize(self) -> None:
-        Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
-        with self._connection() as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS economy_accounts (
-                    guild_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    balance INTEGER NOT NULL DEFAULT 250 CHECK (balance >= 0),
-                    last_activity INTEGER,
-                    last_work INTEGER,
-                    last_rob INTEGER,
-                    PRIMARY KEY (guild_id, user_id)
-                )
-                """
-            )
-            connection.execute(
-                """CREATE INDEX IF NOT EXISTS economy_leaderboard_idx
-                   ON economy_accounts (guild_id, balance DESC, user_id ASC)"""
-            )
-
-    @staticmethod
-    def _now(now: Optional[int]) -> int:
-        return int(time.time() if now is None else now)
-
-    @staticmethod
-    def _ensure_account(connection: sqlite3.Connection, guild_id: int, user_id: int) -> None:
-        connection.execute(
-            "INSERT OR IGNORE INTO economy_accounts (guild_id, user_id) VALUES (?, ?)",
-            (guild_id, user_id),
-        )
-
-    @staticmethod
-    def _row(connection: sqlite3.Connection, guild_id: int, user_id: int) -> sqlite3.Row:
-        row = connection.execute(
-            "SELECT * FROM economy_accounts WHERE guild_id = ? AND user_id = ?",
-            (guild_id, user_id),
-        ).fetchone()
-        if row is None:  # Account creation and reads occur in the same transaction.
-            raise RuntimeError("Economy account was not created")
-        return row
-
-    def balance(self, guild_id: int, user_id: int, *, now: Optional[int] = None) -> int:
-        """Return a balance and record that this user used an economy command."""
-        timestamp = self._now(now)
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            self._ensure_account(connection, guild_id, user_id)
-            connection.execute(
-                "UPDATE economy_accounts SET last_activity = ? WHERE guild_id = ? AND user_id = ?",
-                (timestamp, guild_id, user_id),
-            )
-            return int(self._row(connection, guild_id, user_id)["balance"])
-
-    def peek_balance(self, guild_id: int, user_id: int) -> Optional[int]:
-        """Read a balance without marking the viewed user active."""
-        with self._connection() as connection:
-            row = connection.execute(
-                "SELECT balance FROM economy_accounts WHERE guild_id = ? AND user_id = ?",
-                (guild_id, user_id),
-            ).fetchone()
-            return None if row is None else int(row["balance"])
-
-    def leaderboard(
-        self,
-        guild_id: int,
-        user_id: int,
-        *,
-        limit: int = 10,
-        now: Optional[int] = None,
-    ) -> LeaderboardResult:
-        """Return the guild's richest accounts and the requesting user's rank."""
-        timestamp = self._now(now)
-        limit = max(1, int(limit))
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            self._ensure_account(connection, guild_id, user_id)
-            connection.execute(
-                "UPDATE economy_accounts SET last_activity = ? WHERE guild_id = ? AND user_id = ?",
-                (timestamp, guild_id, user_id),
-            )
-            user_balance = int(self._row(connection, guild_id, user_id)["balance"])
-            rows = connection.execute(
-                """SELECT user_id, balance
-                   FROM economy_accounts
-                   WHERE guild_id = ?
-                   ORDER BY balance DESC, user_id ASC
-                   LIMIT ?""",
-                (guild_id, limit),
-            ).fetchall()
-            entries = tuple(
-                LeaderboardEntry(rank, int(row["user_id"]), int(row["balance"]))
-                for rank, row in enumerate(rows, start=1)
-            )
-            richer_accounts = connection.execute(
-                """SELECT COUNT(*) FROM economy_accounts
-                   WHERE guild_id = ? AND balance > ?""",
-                (guild_id, user_balance),
-            ).fetchone()[0]
-            earlier_ties = connection.execute(
-                """SELECT COUNT(*) FROM economy_accounts
-                   WHERE guild_id = ? AND balance = ? AND user_id < ?""",
-                (guild_id, user_balance, user_id),
-            ).fetchone()[0]
-            user_rank = int(richer_accounts) + int(earlier_ties) + 1
-            return LeaderboardResult(entries, user_rank, user_balance)
-
-    def work(
-        self,
-        guild_id: int,
-        user_id: int,
-        reward: int,
-        *,
-        now: Optional[int] = None,
-    ) -> WorkResult:
-        timestamp = self._now(now)
-        reward = max(0, int(reward))
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            self._ensure_account(connection, guild_id, user_id)
-            row = self._row(connection, guild_id, user_id)
-            connection.execute(
-                "UPDATE economy_accounts SET last_activity = ? WHERE guild_id = ? AND user_id = ?",
-                (timestamp, guild_id, user_id),
-            )
-            last_work = row["last_work"]
-            if last_work is not None:
-                retry_after = WORK_COOLDOWN_SECONDS - (timestamp - int(last_work))
-                if retry_after > 0:
-                    return WorkResult(0, int(row["balance"]), retry_after)
-
-            balance = int(row["balance"]) + reward
-            connection.execute(
-                """UPDATE economy_accounts
-                   SET balance = ?, last_work = ?
-                   WHERE guild_id = ? AND user_id = ?""",
-                (balance, timestamp, guild_id, user_id),
-            )
-            return WorkResult(reward, balance)
-
-    def gamble(
-        self,
-        guild_id: int,
-        user_id: int,
-        amount: int,
-        won: bool,
-        *,
-        now: Optional[int] = None,
-    ) -> GambleResult:
-        result = self.settle_wager(
-            guild_id,
-            user_id,
-            amount,
-            profit=amount if won else -amount,
-            now=now,
-        )
-        return GambleResult(result.accepted, won if result.accepted else False, result.amount, result.balance)
-
-    def settle_wager(
-        self,
-        guild_id: int,
-        user_id: int,
-        amount: int,
-        *,
-        profit: int,
-        now: Optional[int] = None,
-    ) -> WagerResult:
-        """Atomically apply a game result after verifying the player can cover its wager."""
-        timestamp = self._now(now)
-        amount = int(amount)
-        profit = int(profit)
-        if amount > 0 and profit < -amount:
-            raise ValueError("A wager cannot lose more than its amount")
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            self._ensure_account(connection, guild_id, user_id)
-            row = self._row(connection, guild_id, user_id)
-            balance = int(row["balance"])
-            connection.execute(
-                "UPDATE economy_accounts SET last_activity = ? WHERE guild_id = ? AND user_id = ?",
-                (timestamp, guild_id, user_id),
-            )
-            if amount <= 0 or amount > balance:
-                return WagerResult(False, amount, 0, balance)
-
-            balance += profit
-            connection.execute(
-                "UPDATE economy_accounts SET balance = ? WHERE guild_id = ? AND user_id = ?",
-                (balance, guild_id, user_id),
-            )
-            return WagerResult(True, amount, profit, balance)
-
-    def rob(
-        self,
-        guild_id: int,
-        robber_id: int,
-        target_id: int,
-        *,
-        succeeded: bool,
-        steal_percent: int,
-        fine_percent: int,
-        now: Optional[int] = None,
-    ) -> RobResult:
-        """Attempt a robbery, requiring recent target activity in this guild."""
-        timestamp = self._now(now)
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            self._ensure_account(connection, guild_id, robber_id)
-            robber = self._row(connection, guild_id, robber_id)
-            robber_balance = int(robber["balance"])
-            connection.execute(
-                "UPDATE economy_accounts SET last_activity = ? WHERE guild_id = ? AND user_id = ?",
-                (timestamp, guild_id, robber_id),
-            )
-
-            last_rob = robber["last_rob"]
-            if last_rob is not None:
-                retry_after = ROB_COOLDOWN_SECONDS - (timestamp - int(last_rob))
-                if retry_after > 0:
-                    return RobResult("cooldown", 0, robber_balance, retry_after=retry_after)
-
-            target = connection.execute(
-                "SELECT * FROM economy_accounts WHERE guild_id = ? AND user_id = ?",
-                (guild_id, target_id),
-            ).fetchone()
-            if target is None or target["last_activity"] is None:
-                return RobResult("inactive", 0, robber_balance)
-            if timestamp - int(target["last_activity"]) > ROB_ACTIVITY_WINDOW_SECONDS:
-                return RobResult("inactive", 0, robber_balance)
-
-            target_balance = int(target["balance"])
-            if target_balance <= 0:
-                return RobResult("broke", 0, robber_balance, target_balance)
-
-            if succeeded:
-                amount = max(1, target_balance * max(1, steal_percent) // 100)
-                amount = min(amount, target_balance)
-                robber_balance += amount
-                target_balance -= amount
-                status: Literal["success", "caught"] = "success"
-            else:
-                amount = robber_balance * max(1, fine_percent) // 100
-                amount = min(max(1, amount), robber_balance) if robber_balance else 0
-                robber_balance -= amount
-                target_balance += amount
-                status = "caught"
-
-            connection.execute(
-                """UPDATE economy_accounts
-                   SET balance = ?, last_rob = ?
-                   WHERE guild_id = ? AND user_id = ?""",
-                (robber_balance, timestamp, guild_id, robber_id),
-            )
-            connection.execute(
-                "UPDATE economy_accounts SET balance = ? WHERE guild_id = ? AND user_id = ?",
-                (target_balance, guild_id, target_id),
-            )
-            return RobResult(status, amount, robber_balance, target_balance)
+@dataclass(frozen=True)
+class SecurityUpgradeResult:
+    status: Literal["upgraded", "insufficient", "maxed"]
+    level: int
+    cost: int
+    balance: int
+    protection_percent: float
 
 
 class PostgresEconomyStore:
-    """Pooled PostgreSQL economy store with per-account transactional locking."""
+    """Async PostgreSQL economy store backed by a reusable connection pool."""
 
     def __init__(
         self,
         database_url: str,
         *,
-        min_pool_size: int = 2,
+        min_pool_size: int = 5,
         max_pool_size: int = 10,
     ) -> None:
         if not database_url:
             raise ValueError("A PostgreSQL database URL is required")
         try:
             from psycopg.rows import dict_row
-            from psycopg_pool import ConnectionPool
+            from psycopg_pool import AsyncConnectionPool
         except ImportError as error:
             raise RuntimeError(
                 'PostgreSQL support requires: pip install "psycopg[binary,pool]>=3.2,<4"'
@@ -369,24 +124,41 @@ class PostgresEconomyStore:
 
         min_pool_size = max(1, int(min_pool_size))
         max_pool_size = max(min_pool_size, int(max_pool_size))
-        self._pool = ConnectionPool(
+        self._pool = AsyncConnectionPool(
             conninfo=database_url,
             min_size=min_pool_size,
             max_size=max_pool_size,
             timeout=10,
-            kwargs={"row_factory": dict_row},
+            kwargs={
+                "row_factory": dict_row,
+                "prepare_threshold": 3,
+                "application_name": "chudite-economy",
+            },
             open=False,
             name="economy",
         )
-        self._pool.open(wait=True, timeout=30)
-        self._initialize()
+        self._open_lock = asyncio.Lock()
+        self._opened = False
 
-    def close(self) -> None:
-        self._pool.close()
+    async def open(self) -> None:
+        """Open the pool and apply idempotent schema migrations once."""
+        if self._opened:
+            return
+        async with self._open_lock:
+            if self._opened:
+                return
+            await self._pool.open(wait=True, timeout=30)
+            await self._initialize()
+            self._opened = True
 
-    def _initialize(self) -> None:
-        with self._pool.connection() as connection:
-            connection.execute(
+    async def close(self) -> None:
+        if self._opened:
+            await self._pool.close()
+            self._opened = False
+
+    async def _initialize(self) -> None:
+        async with self._pool.connection() as connection:
+            await connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS economy_accounts (
                     guild_id BIGINT NOT NULL,
@@ -395,62 +167,79 @@ class PostgresEconomyStore:
                     last_activity BIGINT,
                     last_work BIGINT,
                     last_rob BIGINT,
+                    security_level INTEGER NOT NULL DEFAULT 0
+                        CHECK (security_level BETWEEN 0 AND 20),
                     PRIMARY KEY (guild_id, user_id)
                 )
                 """
             )
-            connection.execute(
+            await connection.execute(
+                """ALTER TABLE economy_accounts
+                   ADD COLUMN IF NOT EXISTS security_level INTEGER NOT NULL DEFAULT 0
+                   CHECK (security_level BETWEEN 0 AND 20)"""
+            )
+            await connection.execute(
                 """CREATE INDEX IF NOT EXISTS economy_leaderboard_idx
                    ON economy_accounts (guild_id, balance DESC, user_id ASC)"""
             )
+
+    async def _connection(self) -> Any:
+        await self.open()
+        return self._pool.connection()
 
     @staticmethod
     def _now(now: Optional[int]) -> int:
         return int(time.time() if now is None else now)
 
     @staticmethod
-    def _ensure_account(connection: Any, guild_id: int, user_id: int) -> None:
-        connection.execute(
-            """INSERT INTO economy_accounts (guild_id, user_id)
-               VALUES (%s, %s) ON CONFLICT DO NOTHING""",
-            (guild_id, user_id),
-        )
+    async def _fetchone(connection: Any, query: str, parameters: tuple[Any, ...]) -> Any:
+        cursor = await connection.execute(query, parameters)
+        return await cursor.fetchone()
 
     @staticmethod
-    def _locked_row(connection: Any, guild_id: int, user_id: int) -> dict[str, Any]:
-        row = connection.execute(
-            """SELECT * FROM economy_accounts
-               WHERE guild_id = %s AND user_id = %s
-               FOR UPDATE""",
-            (guild_id, user_id),
-        ).fetchone()
-        if row is None:
-            raise RuntimeError("Economy account was not created")
-        return row
+    async def _fetchall(connection: Any, query: str, parameters: tuple[Any, ...]) -> list[Any]:
+        cursor = await connection.execute(query, parameters)
+        return await cursor.fetchall()
 
-    def balance(self, guild_id: int, user_id: int, *, now: Optional[int] = None) -> int:
+    @staticmethod
+    async def _ensure_accounts(connection: Any, guild_id: int, *user_ids: int) -> None:
+        placeholders = ", ".join(["(%s, %s)"] * len(user_ids))
+        parameters: list[int] = []
+        for user_id in user_ids:
+            parameters.extend((guild_id, user_id))
+        await connection.execute(
+            f"""INSERT INTO economy_accounts (guild_id, user_id)
+                VALUES {placeholders} ON CONFLICT DO NOTHING""",
+            tuple(parameters),
+        )
+
+    async def balance(self, guild_id: int, user_id: int, *, now: Optional[int] = None) -> int:
         timestamp = self._now(now)
-        with self._pool.connection() as connection:
-            row = connection.execute(
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            row = await self._fetchone(
+                connection,
                 """INSERT INTO economy_accounts (guild_id, user_id, last_activity)
                    VALUES (%s, %s, %s)
                    ON CONFLICT (guild_id, user_id) DO UPDATE
                    SET last_activity = EXCLUDED.last_activity
                    RETURNING balance""",
                 (guild_id, user_id, timestamp),
-            ).fetchone()
+            )
             return int(row["balance"])
 
-    def peek_balance(self, guild_id: int, user_id: int) -> Optional[int]:
-        with self._pool.connection() as connection:
-            row = connection.execute(
+    async def peek_balance(self, guild_id: int, user_id: int) -> Optional[int]:
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            row = await self._fetchone(
+                connection,
                 """SELECT balance FROM economy_accounts
                    WHERE guild_id = %s AND user_id = %s""",
                 (guild_id, user_id),
-            ).fetchone()
+            )
             return None if row is None else int(row["balance"])
 
-    def leaderboard(
+    async def leaderboard(
         self,
         guild_id: int,
         user_id: int,
@@ -458,43 +247,54 @@ class PostgresEconomyStore:
         limit: int = 10,
         now: Optional[int] = None,
     ) -> LeaderboardResult:
+        """Fetch the top accounts and viewer rank in one database round trip."""
         timestamp = self._now(now)
         limit = max(1, int(limit))
-        with self._pool.connection() as connection:
-            user_row = connection.execute(
-                """INSERT INTO economy_accounts (guild_id, user_id, last_activity)
-                   VALUES (%s, %s, %s)
-                   ON CONFLICT (guild_id, user_id) DO UPDATE
-                   SET last_activity = EXCLUDED.last_activity
-                   RETURNING balance""",
-                (guild_id, user_id, timestamp),
-            ).fetchone()
-            user_balance = int(user_row["balance"])
-            rows = connection.execute(
-                """SELECT user_id, balance FROM economy_accounts
-                   WHERE guild_id = %s
-                   ORDER BY balance DESC, user_id ASC
-                   LIMIT %s""",
-                (guild_id, limit),
-            ).fetchall()
-            entries = tuple(
-                LeaderboardEntry(rank, int(row["user_id"]), int(row["balance"]))
-                for rank, row in enumerate(rows, start=1)
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            rows = await self._fetchall(
+                connection,
+                """WITH viewer AS (
+                       INSERT INTO economy_accounts (guild_id, user_id, last_activity)
+                       VALUES (%s, %s, %s)
+                       ON CONFLICT (guild_id, user_id) DO UPDATE
+                       SET last_activity = EXCLUDED.last_activity
+                       RETURNING user_id, balance
+                   ), all_accounts AS (
+                       SELECT user_id, balance FROM economy_accounts
+                       WHERE guild_id = %s AND user_id <> %s
+                       UNION ALL
+                       SELECT user_id, balance FROM viewer
+                   ), ranked AS (
+                       SELECT user_id, balance,
+                              ROW_NUMBER() OVER (ORDER BY balance DESC, user_id ASC) AS rank
+                       FROM all_accounts
+                   ), annotated AS (
+                       SELECT user_id, balance, rank,
+                              MAX(rank) FILTER (WHERE user_id = %s) OVER () AS user_rank,
+                              MAX(balance) FILTER (WHERE user_id = %s) OVER () AS user_balance
+                       FROM ranked
+                   )
+                   SELECT user_id, balance, rank, user_rank, user_balance
+                   FROM annotated
+                   WHERE rank <= %s OR user_id = %s
+                   ORDER BY rank""",
+                (guild_id, user_id, timestamp, guild_id, user_id, user_id, user_id, limit, user_id),
             )
-            richer_accounts = connection.execute(
-                """SELECT COUNT(*) AS count FROM economy_accounts
-                   WHERE guild_id = %s AND balance > %s""",
-                (guild_id, user_balance),
-            ).fetchone()["count"]
-            earlier_ties = connection.execute(
-                """SELECT COUNT(*) AS count FROM economy_accounts
-                   WHERE guild_id = %s AND balance = %s AND user_id < %s""",
-                (guild_id, user_balance, user_id),
-            ).fetchone()["count"]
-            user_rank = int(richer_accounts) + int(earlier_ties) + 1
-            return LeaderboardResult(entries, user_rank, user_balance)
+            if not rows:
+                raise RuntimeError("Leaderboard query returned no accounts")
+            entries = tuple(
+                LeaderboardEntry(int(row["rank"]), int(row["user_id"]), int(row["balance"]))
+                for row in rows
+                if int(row["rank"]) <= limit
+            )
+            return LeaderboardResult(
+                entries,
+                int(rows[0]["user_rank"]),
+                int(rows[0]["user_balance"]),
+            )
 
-    def work(
+    async def work(
         self,
         guild_id: int,
         user_id: int,
@@ -502,33 +302,51 @@ class PostgresEconomyStore:
         *,
         now: Optional[int] = None,
     ) -> WorkResult:
+        """Settle work and its cooldown in one database round trip."""
         timestamp = self._now(now)
         reward = max(0, int(reward))
-        with self._pool.connection() as connection:
-            self._ensure_account(connection, guild_id, user_id)
-            row = self._locked_row(connection, guild_id, user_id)
-            balance = int(row["balance"])
-            last_work = row["last_work"]
-            if last_work is not None:
-                retry_after = WORK_COOLDOWN_SECONDS - (timestamp - int(last_work))
-                if retry_after > 0:
-                    connection.execute(
-                        """UPDATE economy_accounts SET last_activity = %s
-                           WHERE guild_id = %s AND user_id = %s""",
-                        (timestamp, guild_id, user_id),
-                    )
-                    return WorkResult(0, balance, retry_after)
-
-            balance += reward
-            connection.execute(
-                """UPDATE economy_accounts
-                   SET balance = %s, last_work = %s, last_activity = %s
-                   WHERE guild_id = %s AND user_id = %s""",
-                (balance, timestamp, timestamp, guild_id, user_id),
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            row = await self._fetchone(
+                connection,
+                """WITH inserted AS (
+                       INSERT INTO economy_accounts
+                           (guild_id, user_id, balance, last_activity, last_work)
+                       VALUES (%s, %s, %s + %s, %s, %s)
+                       ON CONFLICT DO NOTHING
+                       RETURNING balance, TRUE AS worked, 0::BIGINT AS retry_after
+                   ), worked AS (
+                       UPDATE economy_accounts
+                       SET balance = balance + %s, last_activity = %s, last_work = %s
+                       WHERE guild_id = %s AND user_id = %s
+                         AND NOT EXISTS (SELECT 1 FROM inserted)
+                         AND (last_work IS NULL OR last_work <= %s - %s)
+                       RETURNING balance, TRUE AS worked, 0::BIGINT AS retry_after
+                   ), cooling_down AS (
+                       UPDATE economy_accounts
+                       SET last_activity = %s
+                       WHERE guild_id = %s AND user_id = %s
+                         AND NOT EXISTS (SELECT 1 FROM inserted)
+                         AND NOT EXISTS (SELECT 1 FROM worked)
+                       RETURNING balance, FALSE AS worked,
+                           GREATEST(1, %s - (%s - last_work))::BIGINT AS retry_after
+                   )
+                   SELECT * FROM inserted
+                   UNION ALL SELECT * FROM worked
+                   UNION ALL SELECT * FROM cooling_down""",
+                (
+                    guild_id, user_id, STARTING_BALANCE, reward, timestamp, timestamp,
+                    reward, timestamp, timestamp, guild_id, user_id,
+                    timestamp, WORK_COOLDOWN_SECONDS,
+                    timestamp, guild_id, user_id, WORK_COOLDOWN_SECONDS, timestamp,
+                ),
             )
-            return WorkResult(reward, balance)
+            if row is None:  # Rare first-use race: retry after the competing insert commits.
+                return await self.work(guild_id, user_id, reward, now=timestamp)
+            worked = bool(row["worked"])
+            return WorkResult(reward if worked else 0, int(row["balance"]), int(row["retry_after"]))
 
-    def gamble(
+    async def gamble(
         self,
         guild_id: int,
         user_id: int,
@@ -537,16 +355,21 @@ class PostgresEconomyStore:
         *,
         now: Optional[int] = None,
     ) -> GambleResult:
-        result = self.settle_wager(
+        result = await self.settle_wager(
             guild_id,
             user_id,
             amount,
             profit=amount if won else -amount,
             now=now,
         )
-        return GambleResult(result.accepted, won if result.accepted else False, result.amount, result.balance)
+        return GambleResult(
+            result.accepted,
+            won if result.accepted else False,
+            result.amount,
+            result.balance,
+        )
 
-    def settle_wager(
+    async def settle_wager(
         self,
         guild_id: int,
         user_id: int,
@@ -555,79 +378,215 @@ class PostgresEconomyStore:
         profit: int,
         now: Optional[int] = None,
     ) -> WagerResult:
+        """Atomically settle a wager in one database round trip."""
         timestamp = self._now(now)
         amount = int(amount)
         profit = int(profit)
         if amount > 0 and profit < -amount:
             raise ValueError("A wager cannot lose more than its amount")
-        with self._pool.connection() as connection:
-            self._ensure_account(connection, guild_id, user_id)
-            row = self._locked_row(connection, guild_id, user_id)
-            balance = int(row["balance"])
-            if amount <= 0 or amount > balance:
-                connection.execute(
+        accepted_at_start = amount > 0 and amount <= STARTING_BALANCE
+        starting_result = STARTING_BALANCE + profit if accepted_at_start else STARTING_BALANCE
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            row = await self._fetchone(
+                connection,
+                """WITH inserted AS (
+                       INSERT INTO economy_accounts
+                           (guild_id, user_id, balance, last_activity)
+                       VALUES (%s, %s, %s, %s)
+                       ON CONFLICT DO NOTHING
+                       RETURNING balance, %s::BOOLEAN AS accepted
+                   ), settled AS (
+                       UPDATE economy_accounts
+                       SET balance = balance + %s, last_activity = %s
+                       WHERE guild_id = %s AND user_id = %s
+                         AND NOT EXISTS (SELECT 1 FROM inserted)
+                         AND %s > 0 AND balance >= %s
+                       RETURNING balance, TRUE AS accepted
+                   ), rejected AS (
+                       UPDATE economy_accounts SET last_activity = %s
+                       WHERE guild_id = %s AND user_id = %s
+                         AND NOT EXISTS (SELECT 1 FROM inserted)
+                         AND NOT EXISTS (SELECT 1 FROM settled)
+                       RETURNING balance, FALSE AS accepted
+                   )
+                   SELECT * FROM inserted
+                   UNION ALL SELECT * FROM settled
+                   UNION ALL SELECT * FROM rejected""",
+                (
+                    guild_id, user_id, starting_result, timestamp, accepted_at_start,
+                    profit, timestamp, guild_id, user_id, amount, amount,
+                    timestamp, guild_id, user_id,
+                ),
+            )
+            if row is None:
+                return await self.settle_wager(
+                    guild_id, user_id, amount, profit=profit, now=timestamp
+                )
+            accepted = bool(row["accepted"])
+            return WagerResult(accepted, amount, profit if accepted else 0, int(row["balance"]))
+
+    async def upgrade_security(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        now: Optional[int] = None,
+    ) -> SecurityUpgradeResult:
+        """Buy the next tier in one database round trip."""
+        timestamp = self._now(now)
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            row = await self._fetchone(
+                connection,
+                """WITH inserted AS (
+                       INSERT INTO economy_accounts (guild_id, user_id, last_activity)
+                       VALUES (%s, %s, %s)
+                       ON CONFLICT DO NOTHING
+                       RETURNING 'insufficient'::TEXT AS status, security_level, balance,
+                                 500::BIGINT AS cost
+                   ), upgraded AS (
+                       UPDATE economy_accounts
+                       SET balance = balance - (500 * (security_level + 1) * (security_level + 1)),
+                           security_level = security_level + 1,
+                           last_activity = %s
+                       WHERE guild_id = %s AND user_id = %s
+                         AND NOT EXISTS (SELECT 1 FROM inserted)
+                         AND security_level < %s
+                         AND balance >= (500 * (security_level + 1) * (security_level + 1))
+                       RETURNING 'upgraded'::TEXT AS status, security_level, balance,
+                                 (500 * security_level * security_level)::BIGINT AS cost
+                   ), unchanged AS (
+                       UPDATE economy_accounts SET last_activity = %s
+                       WHERE guild_id = %s AND user_id = %s
+                         AND NOT EXISTS (SELECT 1 FROM inserted)
+                         AND NOT EXISTS (SELECT 1 FROM upgraded)
+                       RETURNING CASE WHEN security_level >= %s THEN 'maxed' ELSE 'insufficient' END AS status,
+                                 security_level, balance,
+                                 CASE WHEN security_level >= %s THEN 0
+                                      ELSE 500 * (security_level + 1) * (security_level + 1)
+                                 END::BIGINT AS cost
+                   )
+                   SELECT * FROM inserted
+                   UNION ALL SELECT * FROM upgraded
+                   UNION ALL SELECT * FROM unchanged""",
+                (
+                    guild_id, user_id, timestamp,
+                    timestamp, guild_id, user_id, MAX_SECURITY_LEVEL,
+                    timestamp, guild_id, user_id, MAX_SECURITY_LEVEL, MAX_SECURITY_LEVEL,
+                ),
+            )
+            if row is None:
+                return await self.upgrade_security(guild_id, user_id, now=timestamp)
+            level = int(row["security_level"])
+            return SecurityUpgradeResult(
+                str(row["status"]),  # type: ignore[arg-type]
+                level,
+                int(row["cost"]),
+                int(row["balance"]),
+                security_protection_percent(level),
+            )
+
+    async def gift(
+        self,
+        guild_id: int,
+        giver_id: int,
+        recipient_id: int,
+        amount: int,
+        *,
+        now: Optional[int] = None,
+    ) -> GiftResult:
+        """Transfer coins while locking both accounts in a stable order."""
+        timestamp = self._now(now)
+        amount = int(amount)
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            await self._ensure_accounts(connection, guild_id, giver_id, recipient_id)
+            rows = await self._fetchall(
+                connection,
+                """SELECT user_id, balance FROM economy_accounts
+                   WHERE guild_id = %s AND user_id IN (%s, %s)
+                   ORDER BY user_id FOR UPDATE""",
+                (guild_id, giver_id, recipient_id),
+            )
+            balances = {int(row["user_id"]): int(row["balance"]) for row in rows}
+            giver_balance = balances[giver_id]
+            recipient_balance = balances[recipient_id]
+            if amount <= 0 or amount > giver_balance:
+                await connection.execute(
                     """UPDATE economy_accounts SET last_activity = %s
                        WHERE guild_id = %s AND user_id = %s""",
-                    (timestamp, guild_id, user_id),
+                    (timestamp, guild_id, giver_id),
                 )
-                return WagerResult(False, amount, 0, balance)
+                return GiftResult(False, amount, giver_balance, recipient_balance)
 
-            balance += profit
-            connection.execute(
-                """UPDATE economy_accounts SET balance = %s, last_activity = %s
-                   WHERE guild_id = %s AND user_id = %s""",
-                (balance, timestamp, guild_id, user_id),
+            giver_balance -= amount
+            recipient_balance += amount
+            await connection.execute(
+                """UPDATE economy_accounts
+                   SET balance = CASE WHEN user_id = %s THEN %s ELSE %s END,
+                       last_activity = CASE WHEN user_id = %s THEN %s ELSE last_activity END
+                   WHERE guild_id = %s AND user_id IN (%s, %s)""",
+                (
+                    giver_id, giver_balance, recipient_balance,
+                    giver_id, timestamp, guild_id, giver_id, recipient_id,
+                ),
             )
-            return WagerResult(True, amount, profit, balance)
+            return GiftResult(True, amount, giver_balance, recipient_balance)
 
-    def rob(
+    async def rob(
         self,
         guild_id: int,
         robber_id: int,
         target_id: int,
         *,
-        succeeded: bool,
+        success_roll: float,
         steal_percent: int,
         fine_percent: int,
         now: Optional[int] = None,
     ) -> RobResult:
+        """Resolve a robbery atomically while locking both accounts in ID order."""
         timestamp = self._now(now)
-        with self._pool.connection() as connection:
-            self._ensure_account(connection, guild_id, robber_id)
-            rows = connection.execute(
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            await self._ensure_accounts(connection, guild_id, robber_id)
+            rows = await self._fetchall(
+                connection,
                 """SELECT * FROM economy_accounts
-                   WHERE guild_id = %s AND (user_id = %s OR user_id = %s)
+                   WHERE guild_id = %s AND user_id IN (%s, %s)
                    ORDER BY user_id FOR UPDATE""",
                 (guild_id, robber_id, target_id),
-            ).fetchall()
+            )
             accounts = {int(row["user_id"]): row for row in rows}
             robber = accounts[robber_id]
             robber_balance = int(robber["balance"])
-            connection.execute(
-                """UPDATE economy_accounts SET last_activity = %s
-                   WHERE guild_id = %s AND user_id = %s""",
-                (timestamp, guild_id, robber_id),
-            )
 
             last_rob = robber["last_rob"]
             if last_rob is not None:
                 retry_after = ROB_COOLDOWN_SECONDS - (timestamp - int(last_rob))
                 if retry_after > 0:
+                    await self._touch(connection, guild_id, robber_id, timestamp)
                     return RobResult("cooldown", 0, robber_balance, retry_after=retry_after)
 
             target = accounts.get(target_id)
             if target is None or target["last_activity"] is None:
+                await self._touch(connection, guild_id, robber_id, timestamp)
                 return RobResult("inactive", 0, robber_balance)
             if timestamp - int(target["last_activity"]) > ROB_ACTIVITY_WINDOW_SECONDS:
+                await self._touch(connection, guild_id, robber_id, timestamp)
                 return RobResult("inactive", 0, robber_balance)
 
             target_balance = int(target["balance"])
             if target_balance <= 0:
+                await self._touch(connection, guild_id, robber_id, timestamp)
                 return RobResult("broke", 0, robber_balance, target_balance)
 
+            succeeded = success_roll < rob_success_chance(int(target["security_level"]))
             if succeeded:
-                amount = max(1, target_balance * max(1, steal_percent) // 100)
-                amount = min(amount, target_balance)
+                amount = min(
+                    max(1, target_balance * max(1, steal_percent) // 100),
+                    target_balance,
+                )
                 robber_balance += amount
                 target_balance -= amount
                 status: Literal["success", "caught"] = "success"
@@ -638,41 +597,24 @@ class PostgresEconomyStore:
                 target_balance += amount
                 status = "caught"
 
-            connection.execute(
-                """UPDATE economy_accounts SET balance = %s, last_rob = %s
-                   WHERE guild_id = %s AND user_id = %s""",
-                (robber_balance, timestamp, guild_id, robber_id),
-            )
-            connection.execute(
-                """UPDATE economy_accounts SET balance = %s
-                   WHERE guild_id = %s AND user_id = %s""",
-                (target_balance, guild_id, target_id),
+            await connection.execute(
+                """UPDATE economy_accounts
+                   SET balance = CASE WHEN user_id = %s THEN %s ELSE %s END,
+                       last_activity = CASE WHEN user_id = %s THEN %s ELSE last_activity END,
+                       last_rob = CASE WHEN user_id = %s THEN %s ELSE last_rob END
+                   WHERE guild_id = %s AND user_id IN (%s, %s)""",
+                (
+                    robber_id, robber_balance, target_balance,
+                    robber_id, timestamp, robber_id, timestamp,
+                    guild_id, robber_id, target_id,
+                ),
             )
             return RobResult(status, amount, robber_balance, target_balance)
 
-    def import_accounts(
-        self,
-        accounts: Iterable[Sequence[Optional[int]]],
-        *,
-        overwrite: bool = False,
-    ) -> int:
-        """Bulk import SQLite account rows, safely ignoring existing rows by default."""
-        values = list(accounts)
-        if not values:
-            return 0
-        conflict = (
-            """DO UPDATE SET balance = EXCLUDED.balance,
-                   last_activity = EXCLUDED.last_activity,
-                   last_work = EXCLUDED.last_work,
-                   last_rob = EXCLUDED.last_rob"""
-            if overwrite
-            else "DO NOTHING"
+    @staticmethod
+    async def _touch(connection: Any, guild_id: int, user_id: int, timestamp: int) -> None:
+        await connection.execute(
+            """UPDATE economy_accounts SET last_activity = %s
+               WHERE guild_id = %s AND user_id = %s""",
+            (timestamp, guild_id, user_id),
         )
-        query = f"""INSERT INTO economy_accounts
-            (guild_id, user_id, balance, last_activity, last_work, last_rob)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT (guild_id, user_id) {conflict}"""
-        with self._pool.connection() as connection:
-            with connection.cursor() as cursor:
-                cursor.executemany(query, values)
-                return max(0, cursor.rowcount)

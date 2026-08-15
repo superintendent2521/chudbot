@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import random
 from typing import Optional
 
-from interactions import Member, OptionType, SlashContext, slash_command, slash_option
+from interactions import Member, OptionType, SlashContext, listen, slash_command, slash_option
+from interactions.api.events import WebsocketReady
 
 from command_handler import CommandHandler
-from economy_store import DEFAULT_POSTGRES_URL, PostgresEconomyStore
+from economy_store import (
+    BASE_ROB_SUCCESS_PERCENT,
+    DEFAULT_POSTGRES_URL,
+    MAX_SECURITY_LEVEL,
+    PostgresEconomyStore,
+    rob_success_chance,
+)
 
 
 MINIMUM_WAGER = 10
@@ -57,9 +63,13 @@ def setup(handler: CommandHandler) -> None:
     )
     store = PostgresEconomyStore(
         database_url,
-        min_pool_size=int(os.getenv("ECONOMY_DB_POOL_MIN", "2")),
+        min_pool_size=int(os.getenv("ECONOMY_DB_POOL_MIN", "5")),
         max_pool_size=int(os.getenv("ECONOMY_DB_POOL_MAX", "10")),
     )
+
+    @listen(WebsocketReady)
+    async def open_economy_pool(_: WebsocketReady) -> None:
+        await store.open()
 
     @slash_command(name="balance", description="Check an economy balance")
     @slash_option(
@@ -73,12 +83,12 @@ def setup(handler: CommandHandler) -> None:
         if guild_id is None:
             return
         viewer_id = int(ctx.author.id)
-        viewer_balance = await asyncio.to_thread(store.balance, guild_id, viewer_id)
+        viewer_balance = await store.balance(guild_id, viewer_id)
         subject = user or ctx.author
         if int(subject.id) == viewer_id:
             amount = viewer_balance
         else:
-            amount = await asyncio.to_thread(store.peek_balance, guild_id, int(subject.id))
+            amount = await store.peek_balance(guild_id, int(subject.id))
             if amount is None:
                 await ctx.send(f"{subject.mention} hasn't joined the economy yet.")
                 return
@@ -89,7 +99,7 @@ def setup(handler: CommandHandler) -> None:
         guild_id = await _require_guild(ctx)
         if guild_id is None:
             return
-        result = await asyncio.to_thread(store.leaderboard, guild_id, int(ctx.author.id), limit=10)
+        result = await store.leaderboard(guild_id, int(ctx.author.id), limit=10)
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
         lines = [
             f"{medals.get(entry.rank, f'**#{entry.rank}**')} <@{entry.user_id}> — "
@@ -113,7 +123,7 @@ def setup(handler: CommandHandler) -> None:
         if guild_id is None:
             return
         reward = _random.randint(WORK_REWARD_MIN, WORK_REWARD_MAX)
-        result = await asyncio.to_thread(store.work, guild_id, int(ctx.author.id), reward)
+        result = await store.work(guild_id, int(ctx.author.id), reward)
         if result.retry_after:
             await ctx.send(
                 f"⏳ You're tired. You can work again in **{_format_wait(result.retry_after)}**.",
@@ -138,14 +148,13 @@ def setup(handler: CommandHandler) -> None:
             return
         mention = ctx.author.mention
         if amount < MINIMUM_WAGER:
-            await asyncio.to_thread(store.balance, guild_id, int(ctx.author.id))
+            await store.balance(guild_id, int(ctx.author.id))
             await ctx.send(
                 f"{mention} The minimum wager is **{_format_coins(MINIMUM_WAGER)}**.",
                 ephemeral=True,
             )
             return
-        result = await asyncio.to_thread(
-            store.gamble,
+        result = await store.gamble(
             guild_id,
             int(ctx.author.id),
             amount,
@@ -182,7 +191,7 @@ def setup(handler: CommandHandler) -> None:
             return
         mention = ctx.author.mention
         if amount < MINIMUM_WAGER:
-            await asyncio.to_thread(store.balance, guild_id, int(ctx.author.id))
+            await store.balance(guild_id, int(ctx.author.id))
             await ctx.send(
                 f"{mention} The minimum wager is **{_format_coins(MINIMUM_WAGER)}**.",
                 ephemeral=True,
@@ -203,8 +212,7 @@ def setup(handler: CommandHandler) -> None:
             profit = -amount
             outcome = "No match."
 
-        result = await asyncio.to_thread(
-            store.settle_wager,
+        result = await store.settle_wager(
             guild_id,
             int(ctx.author.id),
             amount,
@@ -247,14 +255,14 @@ def setup(handler: CommandHandler) -> None:
         mention = ctx.author.mention
         selected_color = color.strip().lower()
         if selected_color not in {"red", "black", "green"}:
-            await asyncio.to_thread(store.balance, guild_id, int(ctx.author.id))
+            await store.balance(guild_id, int(ctx.author.id))
             await ctx.send(
                 f"{mention} Choose **red**, **black**, or **green**.",
                 ephemeral=True,
             )
             return
         if amount < MINIMUM_WAGER:
-            await asyncio.to_thread(store.balance, guild_id, int(ctx.author.id))
+            await store.balance(guild_id, int(ctx.author.id))
             await ctx.send(
                 f"{mention} The minimum wager is **{_format_coins(MINIMUM_WAGER)}**.",
                 ephemeral=True,
@@ -265,8 +273,7 @@ def setup(handler: CommandHandler) -> None:
         landed_color = "green" if number == 0 else "red" if number in ROULETTE_RED_NUMBERS else "black"
         won = selected_color == landed_color
         profit = amount * 35 if won and selected_color == "green" else amount if won else -amount
-        result = await asyncio.to_thread(
-            store.settle_wager,
+        result = await store.settle_wager(
             guild_id,
             int(ctx.author.id),
             amount,
@@ -302,20 +309,19 @@ def setup(handler: CommandHandler) -> None:
         robber_id = int(ctx.author.id)
         target_id = int(user.id)
         if target_id == robber_id:
-            await asyncio.to_thread(store.balance, guild_id, robber_id)
+            await store.balance(guild_id, robber_id)
             await ctx.send("You can't rob yourself.", ephemeral=True)
             return
         if bool(getattr(user, "bot", False)):
-            await asyncio.to_thread(store.balance, guild_id, robber_id)
+            await store.balance(guild_id, robber_id)
             await ctx.send("You can't rob a bot.", ephemeral=True)
             return
 
-        result = await asyncio.to_thread(
-            store.rob,
+        result = await store.rob(
             guild_id,
             robber_id,
             target_id,
-            succeeded=_random.random() < 0.45,
+            success_roll=_random.random(),
             steal_percent=_random.randint(3, 8),
             fine_percent=_random.randint(5, 15),
         )
@@ -342,6 +348,39 @@ def setup(handler: CommandHandler) -> None:
                 f"Balance: **{_format_coins(result.robber_balance)}**."
             )
 
+    @slash_command(name="security", description="Buy the next anti-rob security tier")
+    async def security_command(ctx: SlashContext):
+        guild_id = await _require_guild(ctx)
+        if guild_id is None:
+            return
+        result = await store.upgrade_security(guild_id, int(ctx.author.id))
+        if result.status == "maxed":
+            await ctx.send(
+                f"🛡️ Your security is already maxed at **tier {MAX_SECURITY_LEVEL}** "
+                f"(**{result.protection_percent:.2f}%** protection). Balance: "
+                f"**{_format_coins(result.balance)}**.",
+                ephemeral=True,
+            )
+            return
+        if result.status == "insufficient":
+            await ctx.send(
+                f"🛡️ Security tier **{result.level + 1}** costs "
+                f"**{_format_coins(result.cost)}**. You are tier **{result.level}/{MAX_SECURITY_LEVEL}** "
+                f"with **{result.protection_percent:.2f}%** protection. Balance: "
+                f"**{_format_coins(result.balance)}**.",
+                ephemeral=True,
+            )
+            return
+
+        success_percent = rob_success_chance(result.level) * 100
+        await ctx.send(
+            f"🛡️ Security upgraded to **tier {result.level}/{MAX_SECURITY_LEVEL}**. "
+            f"Protection: **{result.protection_percent:.2f}%**; robbers now have a "
+            f"**{success_percent:.2f}%** chance to succeed (base "
+            f"{BASE_ROB_SUCCESS_PERCENT:.0f}%). Cost: **{_format_coins(result.cost)}**. "
+            f"Balance: **{_format_coins(result.balance)}**."
+        )
+
     @slash_command(name="gift", description="Give coins to another user")
     @slash_option(
         name="user",
@@ -362,16 +401,15 @@ def setup(handler: CommandHandler) -> None:
         giver_id = int(ctx.author.id)
         recipient_id = int(user.id)
         if recipient_id == giver_id:
-            await asyncio.to_thread(store.balance, guild_id, giver_id)
+            await store.balance(guild_id, giver_id)
             await ctx.send("You can't gift coins to yourself.", ephemeral=True)
             return
         if amount < 1:
-            await asyncio.to_thread(store.balance, guild_id, giver_id)
+            await store.balance(guild_id, giver_id)
             await ctx.send("You must gift at least 1 coin.", ephemeral=True)
             return
 
-        result = await asyncio.to_thread(
-            store.gift,
+        result = await store.gift(
             guild_id,
             giver_id,
             recipient_id,
@@ -397,3 +435,6 @@ def setup(handler: CommandHandler) -> None:
     handler.register_slash_command(slots_command)
     handler.register_slash_command(roulette_command)
     handler.register_slash_command(rob_command)
+    handler.register_slash_command(security_command)
+    handler.register_slash_command(gift_command)
+    handler.register_listener(open_economy_pool)
