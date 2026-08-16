@@ -36,7 +36,7 @@ class EconomyLogWriter:
         *,
         queue_size: int = 10_000,
         batch_size: int = 100,
-        flush_interval: float = 10.0,
+        flush_interval: float = 30.0,
     ) -> None:
         from psycopg.rows import dict_row
         from psycopg_pool import AsyncConnectionPool
@@ -159,6 +159,7 @@ class EconomyLogWriter:
                     json.dumps(data["details"] or {}, separators=(",", ":")),
                 )
             )
+        self._logger.info("Writing batch of %s economy log records", len(batch))
         async with self._pool.connection(timeout=2) as connection:
             async with connection.cursor() as cursor:
                 await cursor.executemany(

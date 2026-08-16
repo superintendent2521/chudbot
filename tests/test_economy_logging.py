@@ -57,6 +57,7 @@ class EconomyLogBatchingTests(unittest.IsolatedAsyncioTestCase):
         connection_context.__aexit__ = AsyncMock(return_value=None)
 
         writer = EconomyLogWriter.__new__(EconomyLogWriter)
+        writer._logger = logging.getLogger("test.economy-log")
         writer._pool = SimpleNamespace(
             connection=Mock(return_value=connection_context)
         )
