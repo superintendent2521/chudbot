@@ -15,7 +15,7 @@ class EconomyLogRecord:
     guild_id: int
     user_id: int
     amount: int
-    balance_after: int
+    balance_after: Optional[int]
     occurred_at: int
     counterparty_id: Optional[int] = None
     counterparty_balance_after: Optional[int] = None
@@ -36,6 +36,7 @@ class EconomyLogWriter:
         *,
         queue_size: int = 10_000,
         batch_size: int = 100,
+        flush_interval: float = 10.0,
     ) -> None:
         from psycopg.rows import dict_row
         from psycopg_pool import AsyncConnectionPool
@@ -57,8 +58,10 @@ class EconomyLogWriter:
             maxsize=max(1, int(queue_size))
         )
         self._batch_size = max(1, int(batch_size))
+        self._flush_interval = max(0.1, float(flush_interval))
         self._task: Optional[asyncio.Task[None]] = None
         self._stopping = False
+        self._buffered = 0
         self.dropped = 0
         self._logger = logging.getLogger("chuds.bot.economy-log")
 
@@ -86,6 +89,11 @@ class EconomyLogWriter:
             return False
         return True
 
+    @property
+    def queued(self) -> int:
+        """Records waiting in the queue or current unflushed batch."""
+        return self._queue.qsize() + self._buffered
+
     async def close(self) -> None:
         self._stopping = True
         task = self._task
@@ -105,11 +113,20 @@ class EconomyLogWriter:
             except asyncio.TimeoutError:
                 continue
             batch = [first]
+            self._buffered = 1
+            deadline = asyncio.get_running_loop().time() + self._flush_interval
             while len(batch) < self._batch_size:
-                try:
-                    batch.append(self._queue.get_nowait())
-                except asyncio.QueueEmpty:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0 or self._stopping:
                     break
+                try:
+                    record = await asyncio.wait_for(
+                        self._queue.get(), timeout=min(remaining, 0.25)
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                batch.append(record)
+                self._buffered = len(batch)
             try:
                 await self._write_batch(batch)
             except asyncio.CancelledError:
@@ -123,6 +140,7 @@ class EconomyLogWriter:
             finally:
                 for _ in batch:
                     self._queue.task_done()
+                self._buffered = 0
 
     async def _write_batch(self, batch: list[EconomyLogRecord]) -> None:
         placeholders = ", ".join(

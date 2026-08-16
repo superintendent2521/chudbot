@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Mapping, Optional
 
 from economy_logging import EconomyLogRecord, EconomyLogWriter
 
@@ -17,9 +17,12 @@ ROB_COOLDOWN_SECONDS = 10 * 60
 ROB_ACTIVITY_WINDOW_SECONDS = 15 * 60
 LOAN_TERM_SECONDS = 60 * 60
 MAX_LOAN_AMOUNT = 5_000
+MAX_MARKET_QUANTITY = 1_000_000
+MAX_MARKET_PRICE = 1_000_000_000
 FISH_COOLDOWN_SECONDS = 5 * 60
 MEMORY_COOLDOWN_SECONDS = 5 * 60
 BOUNTY_COOLDOWN_SECONDS = 10 * 60
+DUMPSTER_COOLDOWN_SECONDS = 10 * 60
 DEFAULT_POSTGRES_URL = "postgresql://postgres:postgres@postgres/economy"
 BASE_ROB_SUCCESS_PERCENT = 45.0
 MAX_SECURITY_LEVEL = 20
@@ -120,6 +123,73 @@ class EconomyStatistics:
     total_balance: int
     average_balance: int
     highest_balance: int
+    queued_logs: int
+    dropped_logs: int
+
+
+@dataclass(frozen=True)
+class InventoryEntry:
+    item_key: str
+    quantity: int
+
+
+@dataclass(frozen=True)
+class InventoryAwardResult:
+    items: tuple[InventoryEntry, ...]
+
+
+@dataclass(frozen=True)
+class InventoryTransferResult:
+    status: Literal["transferred", "invalid", "insufficient"]
+    quantity: int
+    remaining: int
+
+
+@dataclass(frozen=True)
+class InventorySaleResult:
+    status: Literal["sold", "invalid", "insufficient"]
+    quantity: int
+    payout: int
+    remaining: int
+    balance: int
+
+
+@dataclass(frozen=True)
+class BuyOrderResult:
+    status: Literal["created", "insufficient", "invalid"]
+    order_id: Optional[int]
+    quantity: int
+    price_each: int
+    balance: int
+
+
+@dataclass(frozen=True)
+class BuyOrderEntry:
+    order_id: int
+    buyer_id: int
+    item_key: str
+    quantity_remaining: int
+    price_each: int
+
+
+@dataclass(frozen=True)
+class FillBuyOrderResult:
+    status: Literal["filled", "unavailable", "invalid", "insufficient"]
+    order_id: int
+    buyer_id: Optional[int]
+    item_key: Optional[str]
+    quantity: int
+    payout: int
+    seller_balance: int
+    order_remaining: int
+
+
+@dataclass(frozen=True)
+class CancelBuyOrderResult:
+    status: Literal["cancelled", "unavailable"]
+    order_id: int
+    refund: int
+    balance: int
 
 
 @dataclass(frozen=True)
@@ -149,6 +219,7 @@ class PostgresEconomyStore:
         max_pool_size: int = 10,
         log_queue_size: int = 10_000,
         log_batch_size: int = 100,
+        log_flush_interval: float = 10.0,
     ) -> None:
         if not database_url:
             raise ValueError("A PostgreSQL database URL is required")
@@ -181,6 +252,7 @@ class PostgresEconomyStore:
             database_url,
             queue_size=log_queue_size,
             batch_size=log_batch_size,
+            flush_interval=log_flush_interval,
         )
 
     async def open(self) -> None:
@@ -222,6 +294,7 @@ class PostgresEconomyStore:
                     last_fish BIGINT,
                     last_memory BIGINT,
                     last_bounty BIGINT,
+                    last_dumpster BIGINT,
                     loan_balance BIGINT NOT NULL DEFAULT 0 CHECK (loan_balance >= 0),
                     loan_due BIGINT,
                     security_level INTEGER NOT NULL DEFAULT 0
@@ -245,6 +318,9 @@ class PostgresEconomyStore:
                 "ALTER TABLE economy_accounts ADD COLUMN IF NOT EXISTS last_bounty BIGINT"
             )
             await connection.execute(
+                "ALTER TABLE economy_accounts ADD COLUMN IF NOT EXISTS last_dumpster BIGINT"
+            )
+            await connection.execute(
                 """ALTER TABLE economy_accounts ADD COLUMN IF NOT EXISTS loan_balance BIGINT
                    NOT NULL DEFAULT 0 CHECK (loan_balance >= 0)"""
             )
@@ -264,7 +340,7 @@ class PostgresEconomyStore:
                     user_id BIGINT NOT NULL,
                     counterparty_id BIGINT,
                     amount BIGINT NOT NULL,
-                    balance_after BIGINT NOT NULL,
+                    balance_after BIGINT,
                     counterparty_balance_after BIGINT,
                     occurred_at BIGINT NOT NULL,
                     details JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -276,6 +352,43 @@ class PostgresEconomyStore:
                 """CREATE INDEX IF NOT EXISTS economy_log_guild_time_idx
                    ON economy_log (guild_id, occurred_at DESC)"""
             )
+            await connection.execute(
+                "ALTER TABLE economy_log ALTER COLUMN balance_after DROP NOT NULL"
+            )
+            await connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS economy_inventory (
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    quantity BIGINT NOT NULL CHECK (quantity > 0),
+                    first_acquired_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (guild_id, user_id, item_key)
+                )
+                """
+            )
+            await connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS economy_buy_orders (
+                    id BIGSERIAL PRIMARY KEY,
+                    guild_id BIGINT NOT NULL,
+                    buyer_id BIGINT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    quantity_original BIGINT NOT NULL CHECK (quantity_original > 0),
+                    quantity_remaining BIGINT NOT NULL CHECK (quantity_remaining >= 0),
+                    price_each BIGINT NOT NULL CHECK (price_each > 0),
+                    status TEXT NOT NULL DEFAULT 'open'
+                        CHECK (status IN ('open', 'filled', 'cancelled')),
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL
+                )
+                """
+            )
+            await connection.execute(
+                """CREATE INDEX IF NOT EXISTS economy_buy_orders_market_idx
+                   ON economy_buy_orders (guild_id, status, item_key, price_each DESC)"""
+            )
 
     def _log(
         self,
@@ -283,7 +396,7 @@ class PostgresEconomyStore:
         guild_id: int,
         user_id: int,
         amount: int,
-        balance_after: int,
+        balance_after: Optional[int],
         occurred_at: int,
         *,
         counterparty_id: Optional[int] = None,
@@ -435,6 +548,8 @@ class PostgresEconomyStore:
                 total_balance=int(row["total_balance"]),
                 average_balance=int(row["average_balance"]),
                 highest_balance=int(row["highest_balance"]),
+                queued_logs=self._log_writer.queued,
+                dropped_logs=self._log_writer.dropped,
             )
 
     async def work(
@@ -697,11 +812,470 @@ class PostgresEconomyStore:
         self._log("message_reward", guild_id, user_id, amount, balance, timestamp)
         return balance
 
+    async def inventory(self, guild_id: int, user_id: int) -> tuple[InventoryEntry, ...]:
+        """Return a user's persistent inventory for this guild."""
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            rows = await self._fetchall(
+                connection,
+                """SELECT item_key, quantity FROM economy_inventory
+                   WHERE guild_id = %s AND user_id = %s
+                   ORDER BY quantity DESC, item_key ASC""",
+                (guild_id, user_id),
+            )
+        return tuple(
+            InventoryEntry(str(row["item_key"]), int(row["quantity"])) for row in rows
+        )
+
+    async def add_inventory_items(
+        self,
+        guild_id: int,
+        user_id: int,
+        items: Mapping[str, int],
+        *,
+        source: str,
+        now: Optional[int] = None,
+    ) -> InventoryAwardResult:
+        """Atomically add item quantities, then queue a best-effort audit record."""
+        timestamp = self._now(now)
+        awarded = {
+            str(item_key): int(quantity)
+            for item_key, quantity in items.items()
+            if item_key and int(quantity) > 0
+        }
+        if not awarded:
+            raise ValueError("At least one positive inventory quantity is required")
+
+        placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s)"] * len(awarded))
+        parameters: list[Any] = []
+        for item_key, quantity in awarded.items():
+            parameters.extend(
+                (guild_id, user_id, item_key, quantity, timestamp, timestamp)
+            )
+
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            await self._ensure_accounts(connection, guild_id, user_id)
+            rows = await self._fetchall(
+                connection,
+                f"""INSERT INTO economy_inventory
+                    (guild_id, user_id, item_key, quantity, first_acquired_at, updated_at)
+                    VALUES {placeholders}
+                    ON CONFLICT (guild_id, user_id, item_key) DO UPDATE
+                    SET quantity = economy_inventory.quantity + EXCLUDED.quantity,
+                        updated_at = EXCLUDED.updated_at
+                    RETURNING item_key, quantity""",
+                tuple(parameters),
+            )
+            result = InventoryAwardResult(
+                tuple(
+                    InventoryEntry(str(row["item_key"]), int(row["quantity"]))
+                    for row in rows
+                )
+            )
+        self._log(
+            "inventory_award",
+            guild_id,
+            user_id,
+            sum(awarded.values()),
+            None,
+            timestamp,
+            details={"source": source, "items": awarded},
+        )
+        return result
+
+    async def transfer_inventory_item(
+        self,
+        guild_id: int,
+        sender_id: int,
+        recipient_id: int,
+        item_key: str,
+        quantity: int,
+        *,
+        now: Optional[int] = None,
+    ) -> InventoryTransferResult:
+        """Atomically transfer an inventory item between two users."""
+        timestamp = self._now(now)
+        quantity = int(quantity)
+        if sender_id == recipient_id or quantity <= 0 or quantity > MAX_MARKET_QUANTITY:
+            return InventoryTransferResult("invalid", quantity, 0)
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            rows = await self._fetchall(
+                connection,
+                """SELECT user_id, quantity FROM economy_inventory
+                   WHERE guild_id = %s AND user_id IN (%s, %s) AND item_key = %s
+                   ORDER BY user_id FOR UPDATE""",
+                (guild_id, sender_id, recipient_id, item_key),
+            )
+            quantities = {int(row["user_id"]): int(row["quantity"]) for row in rows}
+            available = quantities.get(sender_id, 0)
+            if available < quantity:
+                return InventoryTransferResult("insufficient", quantity, available)
+            remaining = available - quantity
+            if remaining:
+                await connection.execute(
+                    """UPDATE economy_inventory SET quantity = %s, updated_at = %s
+                       WHERE guild_id = %s AND user_id = %s AND item_key = %s""",
+                    (remaining, timestamp, guild_id, sender_id, item_key),
+                )
+            else:
+                await connection.execute(
+                    """DELETE FROM economy_inventory
+                       WHERE guild_id = %s AND user_id = %s AND item_key = %s""",
+                    (guild_id, sender_id, item_key),
+                )
+            await connection.execute(
+                """INSERT INTO economy_inventory
+                       (guild_id, user_id, item_key, quantity, first_acquired_at, updated_at)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (guild_id, user_id, item_key) DO UPDATE
+                   SET quantity = economy_inventory.quantity + EXCLUDED.quantity,
+                       updated_at = EXCLUDED.updated_at""",
+                (guild_id, recipient_id, item_key, quantity, timestamp, timestamp),
+            )
+        self._log(
+            "inventory_transfer", guild_id, sender_id, quantity, None, timestamp,
+            counterparty_id=recipient_id,
+            details={"item_key": item_key},
+        )
+        return InventoryTransferResult("transferred", quantity, remaining)
+
+    async def sell_inventory_item(
+        self,
+        guild_id: int,
+        user_id: int,
+        item_key: str,
+        quantity: int,
+        unit_price: int,
+        *,
+        now: Optional[int] = None,
+    ) -> InventorySaleResult:
+        """Atomically sell inventory to the automated market at a fixed price."""
+        timestamp = self._now(now)
+        quantity = int(quantity)
+        unit_price = int(unit_price)
+        if (
+            quantity <= 0
+            or quantity > MAX_MARKET_QUANTITY
+            or unit_price <= 0
+            or unit_price > MAX_MARKET_PRICE
+        ):
+            return InventorySaleResult("invalid", quantity, 0, 0, 0)
+        payout = quantity * unit_price
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            await self._ensure_accounts(connection, guild_id, user_id)
+            row = await self._fetchone(
+                connection,
+                """SELECT quantity FROM economy_inventory
+                   WHERE guild_id = %s AND user_id = %s AND item_key = %s
+                   FOR UPDATE""",
+                (guild_id, user_id, item_key),
+            )
+            available = 0 if row is None else int(row["quantity"])
+            if available < quantity:
+                balance_row = await self._fetchone(
+                    connection,
+                    """SELECT balance FROM economy_accounts
+                       WHERE guild_id = %s AND user_id = %s""",
+                    (guild_id, user_id),
+                )
+                return InventorySaleResult(
+                    "insufficient", quantity, 0, available, int(balance_row["balance"])
+                )
+            remaining = available - quantity
+            if remaining:
+                await connection.execute(
+                    """UPDATE economy_inventory SET quantity = %s, updated_at = %s
+                       WHERE guild_id = %s AND user_id = %s AND item_key = %s""",
+                    (remaining, timestamp, guild_id, user_id, item_key),
+                )
+            else:
+                await connection.execute(
+                    """DELETE FROM economy_inventory
+                       WHERE guild_id = %s AND user_id = %s AND item_key = %s""",
+                    (guild_id, user_id, item_key),
+                )
+            balance_row = await self._fetchone(
+                connection,
+                """UPDATE economy_accounts
+                   SET balance = balance + %s, last_activity = %s
+                   WHERE guild_id = %s AND user_id = %s RETURNING balance""",
+                (payout, timestamp, guild_id, user_id),
+            )
+            result = InventorySaleResult(
+                "sold", quantity, payout, remaining, int(balance_row["balance"])
+            )
+        self._log(
+            "inventory_system_sale", guild_id, user_id, payout, result.balance, timestamp,
+            details={"item_key": item_key, "quantity": quantity, "unit_price": unit_price},
+        )
+        return result
+
+    async def create_buy_order(
+        self,
+        guild_id: int,
+        buyer_id: int,
+        item_key: str,
+        quantity: int,
+        price_each: int,
+        *,
+        now: Optional[int] = None,
+    ) -> BuyOrderResult:
+        """Create a fully escrowed player buy order."""
+        timestamp = self._now(now)
+        quantity = int(quantity)
+        price_each = int(price_each)
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            await self._ensure_accounts(connection, guild_id, buyer_id)
+            balance_row = await self._fetchone(
+                connection,
+                """SELECT balance FROM economy_accounts
+                   WHERE guild_id = %s AND user_id = %s FOR UPDATE""",
+                (guild_id, buyer_id),
+            )
+            balance = int(balance_row["balance"])
+            if (
+                quantity <= 0
+                or quantity > MAX_MARKET_QUANTITY
+                or price_each <= 0
+                or price_each > MAX_MARKET_PRICE
+            ):
+                return BuyOrderResult("invalid", None, quantity, price_each, balance)
+            escrow = quantity * price_each
+            if balance < escrow:
+                return BuyOrderResult("insufficient", None, quantity, price_each, balance)
+            balance_row = await self._fetchone(
+                connection,
+                """UPDATE economy_accounts SET balance = balance - %s, last_activity = %s
+                   WHERE guild_id = %s AND user_id = %s RETURNING balance""",
+                (escrow, timestamp, guild_id, buyer_id),
+            )
+            order_row = await self._fetchone(
+                connection,
+                """INSERT INTO economy_buy_orders
+                       (guild_id, buyer_id, item_key, quantity_original,
+                        quantity_remaining, price_each, created_at, updated_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                   RETURNING id""",
+                (
+                    guild_id, buyer_id, item_key, quantity, quantity,
+                    price_each, timestamp, timestamp,
+                ),
+            )
+            result = BuyOrderResult(
+                "created", int(order_row["id"]), quantity,
+                price_each, int(balance_row["balance"]),
+            )
+        self._log(
+            "buy_order_created", guild_id, buyer_id, -escrow, result.balance, timestamp,
+            details={
+                "order_id": result.order_id,
+                "item_key": item_key,
+                "quantity": quantity,
+                "price_each": price_each,
+            },
+        )
+        return result
+
+    async def buy_orders(
+        self, guild_id: int, *, item_key: Optional[str] = None, limit: int = 15
+    ) -> tuple[BuyOrderEntry, ...]:
+        """List the highest-paying open buy orders in a guild."""
+        limit = max(1, min(50, int(limit)))
+        parameters: tuple[Any, ...]
+        item_filter = ""
+        if item_key is None:
+            parameters = (guild_id, limit)
+        else:
+            item_filter = " AND item_key = %s"
+            parameters = (guild_id, item_key, limit)
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            rows = await self._fetchall(
+                connection,
+                f"""SELECT id, buyer_id, item_key, quantity_remaining, price_each
+                    FROM economy_buy_orders
+                    WHERE guild_id = %s AND status = 'open'{item_filter}
+                    ORDER BY price_each DESC, created_at ASC LIMIT %s""",
+                parameters,
+            )
+        return tuple(
+            BuyOrderEntry(
+                int(row["id"]), int(row["buyer_id"]), str(row["item_key"]),
+                int(row["quantity_remaining"]), int(row["price_each"]),
+            )
+            for row in rows
+        )
+
+    async def fill_buy_order(
+        self,
+        guild_id: int,
+        seller_id: int,
+        order_id: int,
+        quantity: int,
+        *,
+        now: Optional[int] = None,
+    ) -> FillBuyOrderResult:
+        """Sell inventory into an escrowed buy order atomically."""
+        timestamp = self._now(now)
+        order_id = int(order_id)
+        quantity = int(quantity)
+        if quantity <= 0 or quantity > MAX_MARKET_QUANTITY:
+            return FillBuyOrderResult(
+                "invalid", order_id, None, None, quantity, 0, 0, 0
+            )
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            order = await self._fetchone(
+                connection,
+                """SELECT buyer_id, item_key, quantity_remaining, price_each
+                   FROM economy_buy_orders
+                   WHERE guild_id = %s AND id = %s AND status = 'open' FOR UPDATE""",
+                (guild_id, order_id),
+            )
+            if order is None:
+                return FillBuyOrderResult(
+                    "unavailable", order_id, None, None, quantity, 0, 0, 0
+                )
+            buyer_id = int(order["buyer_id"])
+            item_key = str(order["item_key"])
+            order_remaining = int(order["quantity_remaining"])
+            if buyer_id == seller_id or quantity > order_remaining:
+                return FillBuyOrderResult(
+                    "invalid", order_id, buyer_id, item_key,
+                    quantity, 0, 0, order_remaining,
+                )
+            inventory_rows = await self._fetchall(
+                connection,
+                """SELECT user_id, quantity FROM economy_inventory
+                   WHERE guild_id = %s AND user_id IN (%s, %s) AND item_key = %s
+                   ORDER BY user_id FOR UPDATE""",
+                (guild_id, seller_id, buyer_id, item_key),
+            )
+            inventory_quantities = {
+                int(row["user_id"]): int(row["quantity"]) for row in inventory_rows
+            }
+            available = inventory_quantities.get(seller_id, 0)
+            if available < quantity:
+                return FillBuyOrderResult(
+                    "insufficient", order_id, buyer_id, item_key,
+                    quantity, 0, 0, order_remaining,
+                )
+            seller_remaining = available - quantity
+            if seller_remaining:
+                await connection.execute(
+                    """UPDATE economy_inventory SET quantity = %s, updated_at = %s
+                       WHERE guild_id = %s AND user_id = %s AND item_key = %s""",
+                    (seller_remaining, timestamp, guild_id, seller_id, item_key),
+                )
+            else:
+                await connection.execute(
+                    """DELETE FROM economy_inventory
+                       WHERE guild_id = %s AND user_id = %s AND item_key = %s""",
+                    (guild_id, seller_id, item_key),
+                )
+            await connection.execute(
+                """INSERT INTO economy_inventory
+                       (guild_id, user_id, item_key, quantity, first_acquired_at, updated_at)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (guild_id, user_id, item_key) DO UPDATE
+                   SET quantity = economy_inventory.quantity + EXCLUDED.quantity,
+                       updated_at = EXCLUDED.updated_at""",
+                (guild_id, buyer_id, item_key, quantity, timestamp, timestamp),
+            )
+            order_remaining -= quantity
+            await connection.execute(
+                """UPDATE economy_buy_orders
+                   SET quantity_remaining = %s,
+                       status = CASE WHEN %s = 0 THEN 'filled' ELSE 'open' END,
+                       updated_at = %s
+                   WHERE id = %s""",
+                (order_remaining, order_remaining, timestamp, order_id),
+            )
+            payout = quantity * int(order["price_each"])
+            await self._ensure_accounts(connection, guild_id, seller_id)
+            balance_row = await self._fetchone(
+                connection,
+                """UPDATE economy_accounts SET balance = balance + %s, last_activity = %s
+                   WHERE guild_id = %s AND user_id = %s RETURNING balance""",
+                (payout, timestamp, guild_id, seller_id),
+            )
+            result = FillBuyOrderResult(
+                "filled", order_id, buyer_id, item_key, quantity, payout,
+                int(balance_row["balance"]), order_remaining,
+            )
+        self._log(
+            "buy_order_filled", guild_id, seller_id, result.payout,
+            result.seller_balance, timestamp, counterparty_id=result.buyer_id,
+            details={
+                "order_id": order_id,
+                "item_key": result.item_key,
+                "quantity": quantity,
+            },
+        )
+        return result
+
+    async def cancel_buy_order(
+        self,
+        guild_id: int,
+        buyer_id: int,
+        order_id: int,
+        *,
+        now: Optional[int] = None,
+    ) -> CancelBuyOrderResult:
+        """Cancel a user's open order and refund all unfilled escrow."""
+        timestamp = self._now(now)
+        order_id = int(order_id)
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            order = await self._fetchone(
+                connection,
+                """SELECT quantity_remaining, price_each FROM economy_buy_orders
+                   WHERE guild_id = %s AND id = %s AND buyer_id = %s
+                     AND status = 'open' FOR UPDATE""",
+                (guild_id, order_id, buyer_id),
+            )
+            await self._ensure_accounts(connection, guild_id, buyer_id)
+            if order is None:
+                balance_row = await self._fetchone(
+                    connection,
+                    """SELECT balance FROM economy_accounts
+                       WHERE guild_id = %s AND user_id = %s""",
+                    (guild_id, buyer_id),
+                )
+                return CancelBuyOrderResult(
+                    "unavailable", order_id, 0, int(balance_row["balance"])
+                )
+            refund = int(order["quantity_remaining"]) * int(order["price_each"])
+            await connection.execute(
+                """UPDATE economy_buy_orders
+                   SET quantity_remaining = 0, status = 'cancelled', updated_at = %s
+                   WHERE id = %s""",
+                (timestamp, order_id),
+            )
+            balance_row = await self._fetchone(
+                connection,
+                """UPDATE economy_accounts SET balance = balance + %s, last_activity = %s
+                   WHERE guild_id = %s AND user_id = %s RETURNING balance""",
+                (refund, timestamp, guild_id, buyer_id),
+            )
+            result = CancelBuyOrderResult(
+                "cancelled", order_id, refund, int(balance_row["balance"])
+            )
+        self._log(
+            "buy_order_cancelled", guild_id, buyer_id, result.refund,
+            result.balance, timestamp, details={"order_id": order_id},
+        )
+        return result
+
     async def start_activity(
         self,
         guild_id: int,
         user_id: int,
-        activity: Literal["fish", "memory", "bounty"],
+        activity: Literal["fish", "memory", "bounty", "dumpster"],
         *,
         now: Optional[int] = None,
     ) -> ActivityStartResult:
@@ -710,6 +1284,7 @@ class PostgresEconomyStore:
             "fish": ("last_fish", FISH_COOLDOWN_SECONDS),
             "memory": ("last_memory", MEMORY_COOLDOWN_SECONDS),
             "bounty": ("last_bounty", BOUNTY_COOLDOWN_SECONDS),
+            "dumpster": ("last_dumpster", DUMPSTER_COOLDOWN_SECONDS),
         }
         column, cooldown = settings[activity]
         timestamp = self._now(now)

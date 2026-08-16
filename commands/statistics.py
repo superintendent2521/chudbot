@@ -252,6 +252,8 @@ def setup(handler: CommandHandler) -> None:
                 f"Coins in circulation: {economy.total_balance:,}",
                 f"Average balance: {economy.average_balance:,}",
                 f"Highest balance: {economy.highest_balance:,}",
+                f"Queued economy logs: {economy.queued_logs:,}",
+                f"Dropped economy logs: {economy.dropped_logs:,}",
             ]
         except Exception as error:
             logger.warning("Unable to load economy statistics: %s", error)
