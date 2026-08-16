@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 import logging
 import time
 from dataclasses import dataclass
@@ -522,7 +524,26 @@ class PostgresEconomyStore:
 
     async def _connection(self) -> Any:
         await self.open()
-        return self._pool.connection()
+        return self._timed_connection()
+
+    @asynccontextmanager
+    async def _timed_connection(self) -> AsyncIterator[Any]:
+        """Measure pool contention and total time spent performing a DB operation."""
+        logger = logging.getLogger("chuds.bot.economy-db")
+        wait_started_at = time.perf_counter()
+        acquired_at: Optional[float] = None
+        try:
+            async with self._pool.connection() as connection:
+                acquired_at = time.perf_counter()
+                pool_wait_ms = (acquired_at - wait_started_at) * 1_000
+                log = logger.warning if pool_wait_ms >= 250 else logger.info
+                log("economy_db_pool_acquired wait_ms=%.1f", pool_wait_ms)
+                yield connection
+        finally:
+            if acquired_at is not None:
+                operation_ms = (time.perf_counter() - acquired_at) * 1_000
+                log = logger.warning if operation_ms >= 500 else logger.info
+                log("economy_db_operation_finished operation_ms=%.1f", operation_ms)
 
     @staticmethod
     def _now(now: Optional[int]) -> int:

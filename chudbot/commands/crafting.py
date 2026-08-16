@@ -20,7 +20,7 @@ from interactions.models import Embed
 
 from chudbot.command_handler import CommandHandler
 from chudbot.economy.crafting import CRAFTED_ITEMS_BY_KEY, RECIPES, RECIPES_BY_KEY
-from chudbot.economy.responses import send_ping
+from chudbot.economy.responses import defer_ping, send_ping
 from chudbot.games.spaceflight_dumpster import LOOT_BY_KEY
 
 
@@ -122,6 +122,7 @@ def setup(handler: CommandHandler) -> None:
 
     @slash_command(name="craft", description="Craft inventory items from salvage")
     async def craft_command(ctx: SlashContext):
+        await defer_ping(ctx)
         guild_id = _guild_id(ctx)
         if guild_id is None:
             await send_ping(ctx, "Crafting can only be used in a server.", ephemeral=True)
@@ -166,6 +167,7 @@ def setup(handler: CommandHandler) -> None:
                 )
                 return
 
+            await defer_ping(component.ctx, edit_origin=True)
             custom_id = component.ctx.custom_id
             status = "Use the menu to choose a recipe."
             if custom_id.startswith("craft_previous_"):

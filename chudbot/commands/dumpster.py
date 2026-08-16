@@ -20,7 +20,7 @@ from interactions import (
 
 from chudbot.command_handler import CommandHandler
 from chudbot.economy.crafting import CRAFTED_ITEMS_BY_KEY
-from chudbot.economy.responses import send_ping
+from chudbot.economy.responses import defer_ping, send_ping
 from chudbot.economy.store import BUY_ORDER_TTL_SECONDS, MAX_OPEN_BUY_ORDERS
 from chudbot.games.spaceflight_dumpster import (
     EQUIPMENT_BY_KEY,
@@ -145,6 +145,7 @@ def setup(handler: CommandHandler) -> None:
         opt_type=OptionType.USER,
     )
     async def inventory_command(ctx: SlashContext, user: Optional[Member] = None):
+        await defer_ping(ctx)
         guild_id = _guild_id(ctx)
         if guild_id is None:
             await send_ping(ctx, "Inventories can only be viewed in a server.", ephemeral=True)
@@ -240,6 +241,7 @@ def setup(handler: CommandHandler) -> None:
         opt_type=OptionType.BOOLEAN,
     )
     async def inventory_privacy_command(ctx: SlashContext, private: bool):
+        await defer_ping(ctx, ephemeral=True)
         guild_id = _guild_id(ctx)
         if guild_id is None:
             await send_ping(ctx, "Inventory privacy only applies in a server.", ephemeral=True)
@@ -278,6 +280,7 @@ def setup(handler: CommandHandler) -> None:
     async def transfer_item_command(
         ctx: SlashContext, user: Member, item: str, quantity: int
     ):
+        await defer_ping(ctx)
         guild_id = _guild_id(ctx)
         if guild_id is None:
             await send_ping(ctx, "Items can only be transferred in a server.", ephemeral=True)
@@ -318,6 +321,7 @@ def setup(handler: CommandHandler) -> None:
         loot = await _require_item(ctx, item)
         if loot is None:
             return
+        await defer_ping(ctx, ephemeral=loot.rarity >= 4 and quantity > 0)
         confirmation = None
         confirmation_buttons = []
         if loot.rarity >= 4 and quantity > 0:
@@ -366,6 +370,7 @@ def setup(handler: CommandHandler) -> None:
                     components=confirmation_buttons,
                 )
                 return
+            await defer_ping(confirmation.ctx, edit_origin=True)
         result = await store.sell_inventory_item(
             guild_id, int(ctx.author.id), loot.key, quantity, loot.coin_value
         )
@@ -401,6 +406,7 @@ def setup(handler: CommandHandler) -> None:
         opt_type=OptionType.INTEGER,
     )
     async def buy_order_command(ctx: SlashContext, item: str, quantity: int, price: int):
+        await defer_ping(ctx)
         guild_id = _guild_id(ctx)
         if guild_id is None:
             await send_ping(ctx, "Buy orders can only be posted in a server.", ephemeral=True)
@@ -442,6 +448,7 @@ def setup(handler: CommandHandler) -> None:
         opt_type=OptionType.STRING, autocomplete=True,
     )
     async def market_command(ctx: SlashContext, item: Optional[str] = None):
+        await defer_ping(ctx)
         guild_id = _guild_id(ctx)
         if guild_id is None:
             await send_ping(ctx, "The market can only be viewed in a server.", ephemeral=True)
@@ -472,6 +479,7 @@ def setup(handler: CommandHandler) -> None:
 
     @slash_command(name="myorders", description="View your open market buy orders")
     async def my_orders_command(ctx: SlashContext):
+        await defer_ping(ctx, ephemeral=True)
         guild_id = _guild_id(ctx)
         if guild_id is None:
             await send_ping(ctx, "Orders can only be viewed in a server.", ephemeral=True)
@@ -505,6 +513,7 @@ def setup(handler: CommandHandler) -> None:
         opt_type=OptionType.STRING, autocomplete=True,
     )
     async def price_history_command(ctx: SlashContext, item: str):
+        await defer_ping(ctx)
         guild_id = _guild_id(ctx)
         if guild_id is None:
             await send_ping(ctx, "Price history can only be viewed in a server.", ephemeral=True)
@@ -556,6 +565,7 @@ def setup(handler: CommandHandler) -> None:
         opt_type=OptionType.INTEGER,
     )
     async def fill_order_command(ctx: SlashContext, order_id: int, quantity: int):
+        await defer_ping(ctx)
         guild_id = _guild_id(ctx)
         if guild_id is None:
             await send_ping(ctx, "Orders can only be filled in a server.", ephemeral=True)
@@ -588,6 +598,7 @@ def setup(handler: CommandHandler) -> None:
         opt_type=OptionType.INTEGER,
     )
     async def cancel_order_command(ctx: SlashContext, order_id: int):
+        await defer_ping(ctx)
         guild_id = _guild_id(ctx)
         if guild_id is None:
             await send_ping(ctx, "Orders can only be cancelled in a server.", ephemeral=True)
@@ -608,6 +619,7 @@ def setup(handler: CommandHandler) -> None:
         opt_type=OptionType.STRING, autocomplete=True,
     )
     async def dumpster_command(ctx: SlashContext, equipment: Optional[str] = None):
+        await defer_ping(ctx)
         guild_id = _guild_id(ctx)
         if guild_id is None:
             await send_ping(ctx, "Dumpster diving can only be done in a server.", ephemeral=True)
@@ -688,6 +700,7 @@ def setup(handler: CommandHandler) -> None:
             )
             return
 
+        await defer_ping(component.ctx, edit_origin=True)
         location: DumpsterLocation = location_by_custom_id[component.ctx.custom_id]
         for button in location_buttons:
             button.disabled = True
@@ -801,6 +814,7 @@ def setup(handler: CommandHandler) -> None:
                 )
                 return
 
+            await defer_ping(component.ctx, edit_origin=True)
             if component.ctx.custom_id == leave_button.custom_id:
                 for button in action_buttons:
                     button.disabled = True

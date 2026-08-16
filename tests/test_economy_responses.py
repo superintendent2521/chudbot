@@ -2,10 +2,30 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from chudbot.economy.responses import send_ping
+from chudbot.economy.responses import defer_ping, send_ping
 
 
 class EconomyResponseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_defers_interaction_with_requested_visibility(self):
+        ctx = SimpleNamespace(
+            command_name="work",
+            defer=AsyncMock(),
+        )
+
+        await defer_ping(ctx, ephemeral=True)
+
+        ctx.defer.assert_awaited_once_with(ephemeral=True)
+
+    async def test_component_defer_can_edit_original_response(self):
+        ctx = SimpleNamespace(
+            command_name="sellitem",
+            defer=AsyncMock(),
+        )
+
+        await defer_ping(ctx, edit_origin=True)
+
+        ctx.defer.assert_awaited_once_with(ephemeral=False, edit_origin=True)
+
     async def test_prefixes_response_with_author_mention(self):
         ctx = SimpleNamespace(
             author=SimpleNamespace(id=42, mention="<@42>"),
@@ -18,6 +38,18 @@ class EconomyResponseTests(unittest.IsolatedAsyncioTestCase):
         ctx.send.assert_awaited_once_with(
             "<@42> You earned 10 coins.", ephemeral=True
         )
+
+    async def test_does_not_try_to_change_public_defer_to_ephemeral(self):
+        ctx = SimpleNamespace(
+            author=SimpleNamespace(id=42, mention="<@42>"),
+            deferred=True,
+            ephemeral=False,
+            send=AsyncMock(),
+        )
+
+        await send_ping(ctx, "Try again later.", ephemeral=True)
+
+        ctx.send.assert_awaited_once_with("<@42> Try again later.")
 
     async def test_does_not_duplicate_existing_author_mention(self):
         ctx = SimpleNamespace(

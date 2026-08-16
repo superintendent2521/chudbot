@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import random
 import secrets
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from interactions import (
     Button,
@@ -23,7 +23,7 @@ from interactions.api.events import WebsocketReady
 
 from chudbot.games.blackjack import hand_value, new_game, play_dealer, profit as blackjack_profit
 from chudbot.command_handler import CommandHandler
-from chudbot.economy.responses import send_ping
+from chudbot.economy.responses import defer_ping, send_ping
 from chudbot.economy.store import (
     BASE_ROB_SUCCESS_PERCENT,
     MAX_LOAN_AMOUNT,
@@ -112,6 +112,7 @@ def setup(handler: CommandHandler) -> None:
         opt_type=OptionType.USER,
     )
     async def balance_command(ctx: SlashContext, user: Optional[Member] = None):
+        await defer_ping(ctx)
         guild_id = await _require_guild(ctx)
         if guild_id is None:
             return
@@ -129,6 +130,7 @@ def setup(handler: CommandHandler) -> None:
 
     @slash_command(name="leaderboard", description="See the server's 10 richest economy users")
     async def leaderboard_command(ctx: SlashContext):
+        await defer_ping(ctx)
         guild_id = await _require_guild(ctx)
         if guild_id is None:
             return
@@ -152,6 +154,7 @@ def setup(handler: CommandHandler) -> None:
 
     @slash_command(name="work", description="Work for coins (3-minute cooldown)")
     async def work_command(ctx: SlashContext):
+        await defer_ping(ctx)
         guild_id = await _require_guild(ctx)
         if guild_id is None:
             return
@@ -185,6 +188,7 @@ def setup(handler: CommandHandler) -> None:
         opt_type=OptionType.INTEGER,
     )
     async def loan_command(ctx: SlashContext, amount: Optional[int] = None):
+        await defer_ping(ctx)
         guild_id = await _require_guild(ctx)
         if guild_id is None:
             return
@@ -232,6 +236,7 @@ def setup(handler: CommandHandler) -> None:
         opt_type=OptionType.INTEGER,
     )
     async def repay_command(ctx: SlashContext, amount: Optional[int] = None):
+        await defer_ping(ctx)
         guild_id = await _require_guild(ctx)
         if guild_id is None:
             return
@@ -257,6 +262,7 @@ def setup(handler: CommandHandler) -> None:
 
     @slash_command(name="fish", description="Go fishing for coins (5-minute cooldown)")
     async def fish_command(ctx: SlashContext):
+        await defer_ping(ctx)
         guild_id = await _require_guild(ctx)
         if guild_id is None:
             return
@@ -279,6 +285,7 @@ def setup(handler: CommandHandler) -> None:
 
     @slash_command(name="memory", description="Repeat a hidden space sequence for coins")
     async def memory_command(ctx: SlashContext):
+        await defer_ping(ctx)
         guild_id = await _require_guild(ctx)
         if guild_id is None:
             return
@@ -320,7 +327,7 @@ def setup(handler: CommandHandler) -> None:
         for position, expected in enumerate(sequence):
             try:
                 component = await handler.bot.wait_for_component(
-                    components=buttons,
+                    components=cast(Any, buttons),
                     check=memory_player_only,
                     timeout=20,
                 )
@@ -329,6 +336,7 @@ def setup(handler: CommandHandler) -> None:
                     button.disabled = True
                 await message.edit(content="🧠 Time expired. No reward this round.", components=buttons)
                 return
+            await defer_ping(component.ctx, edit_origin=True)
             selected_index = int(component.ctx.custom_id.rsplit("_", 1)[1])
             if MEMORY_SYMBOLS[selected_index] != expected:
                 for button in buttons:
@@ -361,6 +369,7 @@ def setup(handler: CommandHandler) -> None:
 
     @slash_command(name="bounty", description="Complete a spaceflight bounty for coins")
     async def bounty_command(ctx: SlashContext):
+        await defer_ping(ctx)
         guild_id = await _require_guild(ctx)
         if guild_id is None:
             return
@@ -401,7 +410,7 @@ def setup(handler: CommandHandler) -> None:
 
         try:
             component = await handler.bot.wait_for_component(
-                components=buttons,
+                components=cast(Any, buttons),
                 check=bounty_player_only,
                 timeout=45,
             )
@@ -414,6 +423,7 @@ def setup(handler: CommandHandler) -> None:
             )
             return
 
+        await defer_ping(component.ctx, edit_origin=True)
         selected_index = int(component.ctx.custom_id.rsplit("_", 1)[1])
         for button in buttons:
             button.disabled = True
@@ -441,6 +451,7 @@ def setup(handler: CommandHandler) -> None:
         opt_type=OptionType.INTEGER,
     )
     async def gamble_command(ctx: SlashContext, amount: int):
+        await defer_ping(ctx)
         guild_id = await _require_guild(ctx)
         if guild_id is None:
             return
@@ -484,6 +495,7 @@ def setup(handler: CommandHandler) -> None:
         opt_type=OptionType.INTEGER,
     )
     async def slots_command(ctx: SlashContext, amount: int):
+        await defer_ping(ctx)
         guild_id = await _require_guild(ctx)
         if guild_id is None:
             return
@@ -547,6 +559,7 @@ def setup(handler: CommandHandler) -> None:
         opt_type=OptionType.INTEGER,
     )
     async def roulette_command(ctx: SlashContext, amount: int, color: str):
+        await defer_ping(ctx)
         guild_id = await _require_guild(ctx)
         if guild_id is None:
             return
@@ -627,6 +640,7 @@ def setup(handler: CommandHandler) -> None:
             await send_ping(game_ctx, "Enter a whole number of coins.", ephemeral=True)
             return
 
+        await defer_ping(game_ctx)
         mention = game_ctx.author.mention
         if amount < MINIMUM_WAGER:
             await store.balance(guild_id, int(ctx.author.id))
@@ -721,7 +735,7 @@ def setup(handler: CommandHandler) -> None:
         while True:
             try:
                 component = await handler.bot.wait_for_component(
-                    components=buttons,
+                    components=cast(Any, buttons),
                     check=is_player,
                     timeout=60,
                 )
@@ -731,6 +745,7 @@ def setup(handler: CommandHandler) -> None:
                 await message.edit(content=await finish_game(timed_out=True), components=buttons)
                 return
 
+            await defer_ping(component.ctx, edit_origin=True)
             if component.ctx.custom_id == hit_button.custom_id:
                 player_hand.append(deck.pop())
                 if hand_value(player_hand) < 21:
@@ -762,6 +777,7 @@ def setup(handler: CommandHandler) -> None:
         opt_type=OptionType.USER,
     )
     async def rob_command(ctx: SlashContext, user: Member):
+        await defer_ping(ctx)
         guild_id = await _require_guild(ctx)
         if guild_id is None:
             return
@@ -809,6 +825,7 @@ def setup(handler: CommandHandler) -> None:
 
     @slash_command(name="security", description="Buy the next anti-rob security tier")
     async def security_command(ctx: SlashContext):
+        await defer_ping(ctx)
         guild_id = await _require_guild(ctx)
         if guild_id is None:
             return
@@ -854,6 +871,7 @@ def setup(handler: CommandHandler) -> None:
         opt_type=OptionType.INTEGER,
     )
     async def gift_command(ctx: SlashContext, user: Member, amount: int):
+        await defer_ping(ctx)
         guild_id = await _require_guild(ctx)
         if guild_id is None:
             return

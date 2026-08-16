@@ -10,6 +10,7 @@ from typing import Any, Callable, Iterable, Optional, cast
 from interactions import SlashContext, slash_command
 
 from chudbot.command_handler import CommandHandler
+from chudbot.economy.responses import defer_ping
 
 
 def _iter_values(value: Any) -> list[Any]:
@@ -237,6 +238,7 @@ def setup(handler: CommandHandler) -> None:
 
     @slash_command(name="statistics", description="Show bot statistics")
     async def statistics_command(ctx: SlashContext):
+        await defer_ping(ctx)
         guilds = _get_guilds(bot)
         total_users = sum(_get_member_count(guild) for guild in guilds)
         total_channels = _get_total_channels(bot, guilds)
