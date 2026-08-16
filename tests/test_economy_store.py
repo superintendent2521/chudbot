@@ -3,9 +3,13 @@ import unittest
 from unittest.mock import AsyncMock, Mock
 
 from chudbot.economy.store import (
+    DUMPSTER_COOLDOWN_SECONDS,
     EquipmentUseResult,
+    MAX_DUMPSTER_SPEED_TIER,
     MAX_SECURITY_LEVEL,
     PostgresEconomyStore,
+    dumpster_cooldown_seconds,
+    dumpster_speed_upgrade_cost,
     rob_success_chance,
     security_protection_percent,
     security_upgrade_cost,
@@ -46,6 +50,7 @@ class EconomySecurityTests(unittest.TestCase):
             "take_loan",
             "repay_loan",
             "upgrade_security",
+            "upgrade_dumpster_speed",
             "gift",
             "rob",
         ):
@@ -75,6 +80,29 @@ class EconomySecurityTests(unittest.TestCase):
         self.assertEqual(security_upgrade_cost(1), 500)
         self.assertEqual(security_upgrade_cost(2), 2_000)
         self.assertEqual(security_upgrade_cost(MAX_SECURITY_LEVEL), 200_000)
+
+    def test_dumpster_cooldown_decreases_by_tier(self) -> None:
+        self.assertEqual(
+            dumpster_cooldown_seconds(0), DUMPSTER_COOLDOWN_SECONDS
+        )
+        self.assertEqual(dumpster_cooldown_seconds(1), DUMPSTER_COOLDOWN_SECONDS - 30)
+        self.assertEqual(dumpster_cooldown_seconds(2), DUMPSTER_COOLDOWN_SECONDS - 60)
+        self.assertEqual(dumpster_cooldown_seconds(3), DUMPSTER_COOLDOWN_SECONDS - 90)
+        self.assertEqual(dumpster_cooldown_seconds(4), DUMPSTER_COOLDOWN_SECONDS - 120)
+        self.assertEqual(
+            dumpster_cooldown_seconds(-5),
+            DUMPSTER_COOLDOWN_SECONDS,
+        )
+        self.assertEqual(
+            dumpster_cooldown_seconds(MAX_DUMPSTER_SPEED_TIER + 5),
+            dumpster_cooldown_seconds(MAX_DUMPSTER_SPEED_TIER),
+        )
+
+    def test_dumpster_speed_upgrade_cost_increases_by_tier(self) -> None:
+        self.assertEqual(dumpster_speed_upgrade_cost(1), 500)
+        self.assertEqual(dumpster_speed_upgrade_cost(2), 2_000)
+        self.assertEqual(dumpster_speed_upgrade_cost(3), 4_500)
+        self.assertEqual(dumpster_speed_upgrade_cost(4), 8_000)
 
 
 class _ConnectionContext:

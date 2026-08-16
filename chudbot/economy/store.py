@@ -32,6 +32,8 @@ BASE_ROB_SUCCESS_PERCENT = 45.0
 MAX_SECURITY_LEVEL = 20
 BASE_SECURITY_PROTECTION_PERCENT = 5.0
 SECURITY_PROTECTION_GROWTH = 1.05
+MAX_DUMPSTER_SPEED_TIER = 4
+DUMPSTER_SPEED_STEP_SECONDS = 30
 
 
 def security_protection_percent(level: int) -> float:
@@ -52,6 +54,25 @@ def security_upgrade_cost(level: int) -> int:
     """Return the cost of purchasing a specific security tier."""
     level = min(MAX_SECURITY_LEVEL, max(1, int(level)))
     return 500 * level * level
+
+
+def dumpster_cooldown_seconds(tier: int) -> int:
+    """Return the dumpster refill cooldown (seconds) for a given speed tier."""
+    tier = min(MAX_DUMPSTER_SPEED_TIER, max(0, int(tier)))
+    return max(0, DUMPSTER_COOLDOWN_SECONDS - tier * DUMPSTER_SPEED_STEP_SECONDS)
+
+
+def dumpster_speed_upgrade_cost(level: int) -> int:
+    """Return the cost of the dumpster-refill-speed tier that lands at `level`."""
+    level = min(MAX_DUMPSTER_SPEED_TIER, max(1, int(level)))
+    return 500 * level * level
+
+
+def upgrade_cost_span(
+    per_tier_cost, current: int, target: int
+) -> int:
+    """Total cost of raising a tiered upgrade from `current` (exclusive) up to `target`."""
+    return sum(per_tier_cost(i) for i in range(current + 1, target + 1))
 
 
 @dataclass(frozen=True)
@@ -118,6 +139,15 @@ class SecurityUpgradeResult:
     cost: int
     balance: int
     protection_percent: float
+
+
+@dataclass(frozen=True)
+class DumpsterSpeedUpgradeResult:
+    status: Literal["upgraded", "insufficient", "maxed"]
+    level: int
+    cost: int
+    balance: int
+    cooldown_seconds: int
 
 
 @dataclass(frozen=True)
@@ -345,6 +375,8 @@ class PostgresEconomyStore:
                     loan_due BIGINT,
                     security_level INTEGER NOT NULL DEFAULT 0
                         CHECK (security_level BETWEEN 0 AND 20),
+                    dumpster_speed_tier INTEGER NOT NULL DEFAULT 0
+                        CHECK (dumpster_speed_tier BETWEEN 0 AND 4),
                     PRIMARY KEY (guild_id, user_id)
                 )
                 """
@@ -353,6 +385,11 @@ class PostgresEconomyStore:
                 """ALTER TABLE economy_accounts
                    ADD COLUMN IF NOT EXISTS security_level INTEGER NOT NULL DEFAULT 0
                    CHECK (security_level BETWEEN 0 AND 20)"""
+            )
+            await connection.execute(
+                """ALTER TABLE economy_accounts
+                   ADD COLUMN IF NOT EXISTS dumpster_speed_tier INTEGER NOT NULL DEFAULT 0
+                   CHECK (dumpster_speed_tier BETWEEN 0 AND 4)"""
             )
             await connection.execute(
                 "ALTER TABLE economy_accounts ADD COLUMN IF NOT EXISTS last_fish BIGINT"
@@ -1936,13 +1973,19 @@ class PostgresEconomyStore:
             await self._ensure_accounts(connection, guild_id, user_id)
             row = await self._fetchone(
                 connection,
-                f"""SELECT balance, {column} AS last_used FROM economy_accounts
+                f"""SELECT balance, {column} AS last_used, dumpster_speed_tier
+                    FROM economy_accounts
                     WHERE guild_id = %s AND user_id = %s FOR UPDATE""",
                 (guild_id, user_id),
             )
             last_used = row["last_used"]
+            effective_cooldown = (
+                dumpster_cooldown_seconds(int(row["dumpster_speed_tier"]))
+                if activity == "dumpster"
+                else cooldown
+            )
             if last_used is not None:
-                retry_after = cooldown - (timestamp - int(last_used))
+                retry_after = effective_cooldown - (timestamp - int(last_used))
                 if retry_after > 0:
                     await self._touch(connection, guild_id, user_id, timestamp)
                     return ActivityStartResult(False, int(row["balance"]), retry_after)
@@ -2079,68 +2122,108 @@ class PostgresEconomyStore:
         guild_id: int,
         user_id: int,
         *,
+        target_tier: Optional[int] = None,
         now: Optional[int] = None,
     ) -> SecurityUpgradeResult:
-        """Buy the next tier in one database round trip."""
+        """Buy security tiers atomically, up to `target_tier` (default: next tier)."""
         timestamp = self._now(now)
         connection_context = await self._connection()
         async with connection_context as connection:
+            await self._ensure_accounts(connection, guild_id, user_id)
             row = await self._fetchone(
                 connection,
-                """WITH inserted AS (
-                       INSERT INTO economy_accounts (guild_id, user_id, last_activity)
-                       VALUES (%s, %s, %s)
-                       ON CONFLICT DO NOTHING
-                       RETURNING 'insufficient'::TEXT AS status, security_level, balance,
-                                 500::BIGINT AS cost
-                   ), upgraded AS (
-                       UPDATE economy_accounts
-                       SET balance = balance - (500 * (security_level + 1) * (security_level + 1)),
-                           security_level = security_level + 1,
-                           last_activity = %s
-                       WHERE guild_id = %s AND user_id = %s
-                         AND NOT EXISTS (SELECT 1 FROM inserted)
-                         AND security_level < %s
-                         AND balance >= (500 * (security_level + 1) * (security_level + 1))
-                       RETURNING 'upgraded'::TEXT AS status, security_level, balance,
-                                 (500 * security_level * security_level)::BIGINT AS cost
-                   ), unchanged AS (
-                       UPDATE economy_accounts SET last_activity = %s
-                       WHERE guild_id = %s AND user_id = %s
-                         AND NOT EXISTS (SELECT 1 FROM inserted)
-                         AND NOT EXISTS (SELECT 1 FROM upgraded)
-                       RETURNING CASE WHEN security_level >= %s THEN 'maxed' ELSE 'insufficient' END AS status,
-                                 security_level, balance,
-                                 CASE WHEN security_level >= %s THEN 0
-                                      ELSE 500 * (security_level + 1) * (security_level + 1)
-                                 END::BIGINT AS cost
-                   )
-                   SELECT * FROM inserted
-                   UNION ALL SELECT * FROM upgraded
-                   UNION ALL SELECT * FROM unchanged""",
-                (
-                    guild_id, user_id, timestamp,
-                    timestamp, guild_id, user_id, MAX_SECURITY_LEVEL,
-                    timestamp, guild_id, user_id, MAX_SECURITY_LEVEL, MAX_SECURITY_LEVEL,
-                ),
+                """SELECT balance, security_level FROM economy_accounts
+                   WHERE guild_id = %s AND user_id = %s FOR UPDATE""",
+                (guild_id, user_id),
             )
-            result = None
-            if row is not None:
-                level = int(row["security_level"])
-                result = SecurityUpgradeResult(
-                    str(row["status"]),  # type: ignore[arg-type]
-                    level,
-                    int(row["cost"]),
-                    int(row["balance"]),
-                    security_protection_percent(level),
+            balance = int(row["balance"])
+            current = int(row["security_level"])
+            if target_tier is None:
+                target = min(MAX_SECURITY_LEVEL, current + 1)
+            else:
+                target = min(MAX_SECURITY_LEVEL, max(1, int(target_tier)))
+            if current >= target:
+                await self._touch(connection, guild_id, user_id, timestamp)
+                return SecurityUpgradeResult(
+                    "maxed", current, 0, balance, security_protection_percent(current)
                 )
-        if result is None:
-            return await self.upgrade_security(guild_id, user_id, now=timestamp)
-        if result.status == "upgraded":
-            self._log(
-                "security_upgrade", guild_id, user_id, -result.cost,
-                result.balance, timestamp, details={"level": result.level},
+            cost = upgrade_cost_span(security_upgrade_cost, current, target)
+            if balance < cost:
+                await self._touch(connection, guild_id, user_id, timestamp)
+                return SecurityUpgradeResult(
+                    "insufficient", current, cost, balance,
+                    security_protection_percent(current),
+                )
+            new_balance = balance - cost
+            await connection.execute(
+                """UPDATE economy_accounts
+                   SET balance = %s, security_level = %s, last_activity = %s
+                   WHERE guild_id = %s AND user_id = %s""",
+                (new_balance, target, timestamp, guild_id, user_id),
             )
+            result = SecurityUpgradeResult(
+                "upgraded", target, cost, new_balance,
+                security_protection_percent(target),
+            )
+        self._log(
+            "security_upgrade", guild_id, user_id, -cost, result.balance, timestamp,
+            details={"level": target, "from_level": current},
+        )
+        return result
+
+    async def upgrade_dumpster_speed(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        target_tier: Optional[int] = None,
+        now: Optional[int] = None,
+    ) -> DumpsterSpeedUpgradeResult:
+        """Buy dumpster refill-speed tiers atomically, up to `target_tier` (default: next tier)."""
+        timestamp = self._now(now)
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            await self._ensure_accounts(connection, guild_id, user_id)
+            row = await self._fetchone(
+                connection,
+                """SELECT balance, dumpster_speed_tier FROM economy_accounts
+                   WHERE guild_id = %s AND user_id = %s FOR UPDATE""",
+                (guild_id, user_id),
+            )
+            balance = int(row["balance"])
+            current = int(row["dumpster_speed_tier"])
+            if target_tier is None:
+                target = min(MAX_DUMPSTER_SPEED_TIER, current + 1)
+            else:
+                target = min(MAX_DUMPSTER_SPEED_TIER, max(0, int(target_tier)))
+            if current >= target:
+                await self._touch(connection, guild_id, user_id, timestamp)
+                return DumpsterSpeedUpgradeResult(
+                    "maxed", current, 0, balance,
+                    dumpster_cooldown_seconds(current),
+                )
+            cost = upgrade_cost_span(dumpster_speed_upgrade_cost, current, target)
+            if balance < cost:
+                await self._touch(connection, guild_id, user_id, timestamp)
+                return DumpsterSpeedUpgradeResult(
+                    "insufficient", current, cost, balance,
+                    dumpster_cooldown_seconds(current),
+                )
+            new_balance = balance - cost
+            await connection.execute(
+                """UPDATE economy_accounts
+                   SET balance = %s, dumpster_speed_tier = %s, last_activity = %s
+                   WHERE guild_id = %s AND user_id = %s""",
+                (new_balance, target, timestamp, guild_id, user_id),
+            )
+            result = DumpsterSpeedUpgradeResult(
+                "upgraded", target, cost, new_balance,
+                dumpster_cooldown_seconds(target),
+            )
+        self._log(
+            "dumpster_speed_upgrade", guild_id, user_id, -cost, result.balance, timestamp,
+            details={"level": target, "from_level": current},
+        )
         return result
 
     async def gift(

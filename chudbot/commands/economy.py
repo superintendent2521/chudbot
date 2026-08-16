@@ -8,6 +8,7 @@ import secrets
 from typing import Any, Optional, cast
 
 from interactions import (
+    AutocompleteContext,
     Button,
     ButtonStyle,
     Member,
@@ -26,6 +27,7 @@ from chudbot.command_handler import CommandHandler
 from chudbot.economy.responses import defer_ping, send_ping
 from chudbot.economy.store import (
     BASE_ROB_SUCCESS_PERCENT,
+    MAX_DUMPSTER_SPEED_TIER,
     MAX_LOAN_AMOUNT,
     MAX_SECURITY_LEVEL,
     rob_success_chance,
@@ -857,6 +859,103 @@ def setup(handler: CommandHandler) -> None:
             f"Balance: **{_format_coins(result.balance)}**."
         )
 
+    async def _send_upgrade_device_autocomplete(ctx: AutocompleteContext) -> None:
+        search = (ctx.input_text or "").strip().casefold()
+        for value, name in (
+            ("security", "🛡️ Security"),
+            ("dumpster", "🗑️ Dumpster refill"),
+        ):
+            if not search or search in name.casefold() or search in value.casefold():
+                await send_ping(ctx, choices=[{"name": name, "value": value}])
+                return
+        await send_ping(ctx, choices=[])
+
+    @slash_command(name="upgrade", description="Upgrade a security or dumpster-refill device to a tier")
+    @slash_option(
+        name="device",
+        description="Device to upgrade",
+        required=True,
+        opt_type=OptionType.STRING,
+        autocomplete=True,
+    )
+    @slash_option(
+        name="tier",
+        description="Target tier (1 = first upgrade, higher = skip ahead)",
+        required=True,
+        opt_type=OptionType.INTEGER,
+    )
+    async def upgrade_command(ctx: SlashContext, device: str, tier: int):
+        await defer_ping(ctx)
+        guild_id = await _require_guild(ctx)
+        if guild_id is None:
+            return
+        device_key = device.strip().casefold()
+        if device_key in ("security", "safe", "anti-rob", "rob"):
+            result = await store.upgrade_security(
+                guild_id, int(ctx.author.id), target_tier=tier
+            )
+            if result.status == "maxed":
+                await send_ping(ctx,
+                    f"🛡️ Your security is already at or above **tier {result.level}/"
+                    f"{MAX_SECURITY_LEVEL}** (**{result.protection_percent:.2f}%** "
+                    f"protection). Balance: **{_format_coins(result.balance)}**.",
+                    ephemeral=True,
+                )
+                return
+            if result.status == "insufficient":
+                await send_ping(ctx,
+                    f"🛡️ Raising security to **tier {tier}/{MAX_SECURITY_LEVEL}** costs "
+                    f"**{_format_coins(result.cost)}**. You're tier "
+                    f"**{result.level}/{MAX_SECURITY_LEVEL}** with "
+                    f"**{result.protection_percent:.2f}%** protection. Balance: "
+                    f"**{_format_coins(result.balance)}**.",
+                    ephemeral=True,
+                )
+                return
+            success_percent = rob_success_chance(result.level) * 100
+            await send_ping(ctx,
+                f"🛡️ Security upgraded to **tier {result.level}/{MAX_SECURITY_LEVEL}**. "
+                f"Protection: **{result.protection_percent:.2f}%**; robbers now have a "
+                f"**{success_percent:.2f}%** chance to succeed (base "
+                f"{BASE_ROB_SUCCESS_PERCENT:.0f}%). Cost: **{_format_coins(result.cost)}**. "
+                f"Balance: **{_format_coins(result.balance)}**."
+            )
+            return
+        if device_key in ("dumpster", "refill", "dumpster-speed", "dumpster_speed"):
+            result = await store.upgrade_dumpster_speed(
+                guild_id, int(ctx.author.id), target_tier=tier
+            )
+            if result.status == "maxed":
+                await send_ping(ctx,
+                    f"🗑️ Your dumpster refill speed is already at **tier {result.level}/"
+                    f"{MAX_DUMPSTER_SPEED_TIER}** (refill "
+                    f"**{_format_wait(result.cooldown_seconds)}**). Balance: "
+                    f"**{_format_coins(result.balance)}**.",
+                    ephemeral=True,
+                )
+                return
+            if result.status == "insufficient":
+                await send_ping(ctx,
+                    f"🗑️ Raising dumpster refill speed to **tier {tier}/"
+                    f"{MAX_DUMPSTER_SPEED_TIER}** costs **{_format_coins(result.cost)}**. "
+                    f"You're tier **{result.level}/{MAX_DUMPSTER_SPEED_TIER}** (refill "
+                    f"**{_format_wait(result.cooldown_seconds)}**). Balance: "
+                    f"**{_format_coins(result.balance)}**.",
+                    ephemeral=True,
+                )
+                return
+            await send_ping(ctx,
+                f"🗑️ Dumpster refill speed upgraded to **tier {result.level}/"
+                f"{MAX_DUMPSTER_SPEED_TIER}**. Refill time is now "
+                f"**{_format_wait(result.cooldown_seconds)}**. Cost: "
+                f"**{_format_coins(result.cost)}**. Balance: **{_format_coins(result.balance)}**."
+            )
+            return
+        await send_ping(ctx,
+            "Unknown device. Choose **security** or **dumpster** via autocomplete.",
+            ephemeral=True,
+        )
+
     @slash_command(name="gift", description="Give coins to another user")
     @slash_option(
         name="user",
@@ -916,8 +1015,13 @@ def setup(handler: CommandHandler) -> None:
     handler.register_slash_command(gamble_command)
     handler.register_slash_command(slots_command)
     handler.register_slash_command(roulette_command)
+    @upgrade_command.autocomplete("device")
+    async def upgrade_device_autocomplete(ctx: AutocompleteContext):
+        await _send_upgrade_device_autocomplete(ctx)
+
     handler.register_slash_command(blackjack_command)
     handler.register_slash_command(rob_command)
     handler.register_slash_command(security_command)
+    handler.register_slash_command(upgrade_command)
     handler.register_slash_command(gift_command)
     handler.register_listener(open_economy_pool)

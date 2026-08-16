@@ -46,10 +46,12 @@ class CommandHandler:
     def __init__(self, bot: Client, resources: CommandResources) -> None:
         self.bot = bot
         self.resources = resources
+        self.registered_commands: list[InteractionCommand] = []
 
     def register_slash_command(self, command: InteractionCommand) -> None:
         """Register a slash command with the client."""
         self.bot.add_interaction(command)
+        self.registered_commands.append(command)
 
     def register_listener(self, listener: Listener) -> None:
         """Register an event listener with the client."""
