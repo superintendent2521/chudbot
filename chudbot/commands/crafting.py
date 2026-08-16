@@ -8,6 +8,7 @@ import secrets
 from typing import Any, Optional, cast
 
 from interactions import (
+    ActionRow,
     Button,
     ButtonStyle,
     SlashContext,
@@ -111,7 +112,9 @@ def _craft_components(page: int, session_id: str) -> list[Any]:
         emoji="▶️",
         disabled=page >= page_count - 1,
     )
-    return [menu, previous, following]
+    # A select menu consumes an entire Discord action row. Keep navigation on
+    # its own row so the library cannot auto-pack incompatible components.
+    return [ActionRow(menu), ActionRow(previous, following)]
 
 
 def setup(handler: CommandHandler) -> None:
@@ -152,8 +155,9 @@ def setup(handler: CommandHandler) -> None:
                     timeout=CRAFT_TIMEOUT,
                 )
             except asyncio.TimeoutError:
-                for interactive in components:
-                    interactive.disabled = True
+                for row in components:
+                    for interactive in row.components:
+                        interactive.disabled = True
                 embed.set_footer(text="Crafting session expired • Run /craft to reopen it")
                 await message.edit(
                     content="This crafting session has expired.",
