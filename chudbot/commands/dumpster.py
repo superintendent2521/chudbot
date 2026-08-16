@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import random
 import secrets
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from interactions import (
     AutocompleteContext,
@@ -19,6 +19,7 @@ from interactions import (
 )
 
 from chudbot.command_handler import CommandHandler
+from chudbot.economy.crafting import CRAFTED_ITEMS_BY_KEY
 from chudbot.economy.responses import send_ping
 from chudbot.economy.store import BUY_ORDER_TTL_SECONDS, MAX_OPEN_BUY_ORDERS
 from chudbot.games.spaceflight_dumpster import (
@@ -136,7 +137,7 @@ async def _require_item(ctx: SlashContext, query: str):
 def setup(handler: CommandHandler) -> None:
     store = handler.resources.economy_store
 
-    @slash_command(name="inventory", description="View collected spaceflight salvage")
+    @slash_command(name="inventory", description="View salvage and crafted inventory items")
     @slash_option(
         name="user",
         description="User whose inventory you want to view",
@@ -167,29 +168,57 @@ def setup(handler: CommandHandler) -> None:
         )
         inventory_lines = []
         total_value = 0
-        sorted_inventory = sorted(
-            quantities.items(),
+        salvage_inventory = sorted(
+            (
+                (item_key, quantity)
+                for item_key, quantity in quantities.items()
+                if item_key in LOOT_BY_KEY
+            ),
             key=lambda entry: (
-                -(LOOT_BY_KEY[entry[0]].rarity if entry[0] in LOOT_BY_KEY else 0),
+                -LOOT_BY_KEY[entry[0]].rarity,
                 entry[0],
             ),
         )
         current_rarity = None
-        for item_key, quantity in sorted_inventory:
-            item = LOOT_BY_KEY.get(item_key)
-            if item is None:
-                inventory_lines.append(f"📦 **Unknown Salvage** ×{quantity}")
-            else:
-                if item.rarity != current_rarity:
-                    current_rarity = item.rarity
-                    inventory_lines.append(
-                        f"\n**{_rarity_name(item.rarity)} {'★' * item.rarity}**"
-                    )
-                total_value += item.coin_value * quantity
+        for item_key, quantity in salvage_inventory:
+            item = LOOT_BY_KEY[item_key]
+            if item.rarity != current_rarity:
+                current_rarity = item.rarity
                 inventory_lines.append(
-                    f"{item.emoji} **{item.name}** ×{quantity} — "
-                    f"auto-sell {_format_coins(item.coin_value)} each"
+                    f"\n**{_rarity_name(item.rarity)} {'★' * item.rarity}**"
                 )
+            total_value += item.coin_value * quantity
+            inventory_lines.append(
+                f"{item.emoji} **{item.name}** ×{quantity} — "
+                f"auto-sell {_format_coins(item.coin_value)} each"
+            )
+
+        crafted_inventory = sorted(
+            (
+                (CRAFTED_ITEMS_BY_KEY[item_key], quantity)
+                for item_key, quantity in quantities.items()
+                if item_key in CRAFTED_ITEMS_BY_KEY
+            ),
+            key=lambda entry: entry[0].name,
+        )
+        if crafted_inventory:
+            inventory_lines.append("\n**🛠️ Crafted Items**")
+            inventory_lines.extend(
+                f"{item.emoji} **{item.name}** ×{quantity}"
+                for item, quantity in crafted_inventory
+            )
+
+        unknown_inventory = sorted(
+            (item_key, quantity)
+            for item_key, quantity in quantities.items()
+            if item_key not in LOOT_BY_KEY and item_key not in CRAFTED_ITEMS_BY_KEY
+        )
+        if unknown_inventory:
+            inventory_lines.append("\n**📦 Other Items**")
+            inventory_lines.extend(
+                f"📦 **{item_key.replace('_', ' ').title()}** ×{quantity}"
+                for item_key, quantity in unknown_inventory
+            )
         if active_equipment:
             inventory_lines.append("\n**Active Dumpster Equipment**")
             for entry in active_equipment:
@@ -200,9 +229,9 @@ def setup(handler: CommandHandler) -> None:
                     f"{emoji} **{name}** — {entry.quantity} dumpster uses left"
                 )
         await send_ping(ctx,
-            f"📦 **{subject_name}'s Spaceflight Inventory**\n"
+            f"📦 **{subject_name}'s Inventory**\n"
             + "\n".join(inventory_lines)
-            + f"\n\nTotal automated value: **{_format_coins(total_value)}**"
+            + f"\n\nSalvage auto-sell value: **{_format_coins(total_value)}**"
         )
 
     @slash_command(name="inventoryprivacy", description="Make your inventory public or private")
@@ -317,7 +346,7 @@ def setup(handler: CommandHandler) -> None:
 
             try:
                 confirmation = await handler.bot.wait_for_component(
-                    components=confirmation_buttons,
+                    components=cast(Any, confirmation_buttons),
                     check=sale_owner_only,
                     timeout=30,
                 )
@@ -433,11 +462,12 @@ def setup(handler: CommandHandler) -> None:
             order_item = LOOT_BY_KEY.get(order.item_key)
             item_name = order_item.name if order_item is not None else order.item_key
             lines.append(
-                f"**#{order.order_id}** — {item_name} ×{order.quantity_remaining:,} — "
-                f"**{_format_coins(order.price_each)} each** — buyer ID `{order.buyer_id}` — "
+                f"**Order ID: `{order.order_id}`** — "
+                f"{item_name} ×{order.quantity_remaining:,} — "
+                f"**{_format_coins(order.price_each)} each** — "
                 f"expires <t:{order.expires_at}:R>"
             )
-        lines.append("Use `/fillorder` to sell into an order.")
+        lines.append("Use `/fillorder order_id:<ID> quantity:<amount>` to sell into an order.")
         await send_ping(ctx, "\n".join(lines))
 
     @slash_command(name="myorders", description="View your open market buy orders")
@@ -645,7 +675,7 @@ def setup(handler: CommandHandler) -> None:
 
         try:
             component = await handler.bot.wait_for_component(
-                components=location_buttons,
+                components=cast(Any, location_buttons),
                 check=player_only,
                 timeout=LOCATION_TIMEOUT,
             )
@@ -663,6 +693,7 @@ def setup(handler: CommandHandler) -> None:
             button.disabled = True
         equipment_use = None
         if equipment_rule is not None:
+            assert equipment_item is not None
             equipment_use = await store.use_inventory_equipment(
                 guild_id,
                 user_id,
@@ -703,15 +734,16 @@ def setup(handler: CommandHandler) -> None:
         max_rounds = MAX_ROUNDS + (
             0 if equipment_rule is None else equipment_rule.extra_rounds
         )
-        equipment_text = (
-            "No equipment"
-            if equipment_rule is None
-            else (
+        if equipment_rule is None:
+            equipment_text = "No equipment"
+        else:
+            assert equipment_item is not None
+            assert equipment_use is not None
+            equipment_text = (
                 f"{equipment_item.emoji} {equipment_item.name}: "
                 f"{equipment_rule.description} "
                 f"(**{equipment_use.uses_remaining} uses remain**)"
             )
-        )
 
         await component.ctx.edit_origin(
             content=(
@@ -738,16 +770,33 @@ def setup(handler: CommandHandler) -> None:
         for round_number in range(1, max_rounds + 1):
             try:
                 component = await handler.bot.wait_for_component(
-                    components=action_buttons,
+                    components=cast(Any, action_buttons),
                     check=player_only,
                     timeout=ACTION_TIMEOUT,
                 )
             except asyncio.TimeoutError:
                 for button in action_buttons:
                     button.disabled = True
+                equipment_restored = False
+                if equipment_rule is not None and equipment_use is not None:
+                    equipment_restored = await store.restore_equipment_use(
+                        guild_id,
+                        user_id,
+                        equipment_rule.item_key,
+                        equipment_use,
+                        source="dumpster_timeout",
+                    )
                 saved = await bank_haul()
+                equipment_text = (
+                    f"\n\nYour **{equipment_item.name}** was not used."
+                    if equipment_restored and equipment_item is not None
+                    else ""
+                )
                 await message.edit(
-                    content=f"⌛ Time expired, so you left the dumpster.\n\n{saved}",
+                    content=(
+                        f"⌛ Time expired, so you left the dumpster.\n\n"
+                        f"{saved}{equipment_text}"
+                    ),
                     components=action_buttons,
                 )
                 return

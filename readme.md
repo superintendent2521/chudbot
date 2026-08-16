@@ -39,3 +39,9 @@ Application code lives in the `chudbot` package and is grouped by feature:
 
 Runtime JSON data lives in `data`. See [docs/structure.md](docs/structure.md) for
 the full repository map.
+
+## Crafting recipes
+
+Crafting recipes are defined in `chudbot/economy/crafting.py`. Add a
+`CraftingRecipe` to `RECIPES` with a stable key, its output item, and the
+required inventory item keys; `/craft` discovers it automatically.

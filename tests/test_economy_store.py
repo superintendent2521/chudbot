@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock
 
 from chudbot.economy.store import (
+    EquipmentUseResult,
     MAX_SECURITY_LEVEL,
     PostgresEconomyStore,
     rob_success_chance,
@@ -28,9 +29,11 @@ class EconomySecurityTests(unittest.TestCase):
             "inventory_is_private",
             "set_inventory_private",
             "add_inventory_items",
+            "craft_inventory_item",
             "transfer_inventory_item",
             "consume_inventory_item",
             "use_inventory_equipment",
+            "restore_equipment_use",
             "sell_inventory_item",
             "create_buy_order",
             "buy_orders",
@@ -86,6 +89,70 @@ class _ConnectionContext:
 
 
 class EconomyMarketTests(unittest.IsolatedAsyncioTestCase):
+    async def test_crafting_consumes_ingredients_and_adds_output_atomically(self) -> None:
+        store = PostgresEconomyStore.__new__(PostgresEconomyStore)
+        connection = Mock()
+        connection.execute = AsyncMock()
+        store._connection = AsyncMock(return_value=_ConnectionContext(connection))
+        store._ensure_accounts = AsyncMock()
+        store._fetchall = AsyncMock(
+            return_value=[
+                {"item_key": "scrap_wiring", "quantity": 5},
+                {"item_key": "thermal_blanket", "quantity": 1},
+            ]
+        )
+        store._fetchone = AsyncMock(return_value={"quantity": 2})
+        store._log = Mock()
+
+        result = await store.craft_inventory_item(
+            1,
+            2,
+            "insulated_cable",
+            1,
+            {"scrap_wiring": 3, "thermal_blanket": 1},
+            recipe_key="insulated_cable",
+            now=1_000,
+        )
+
+        self.assertEqual(result.status, "crafted")
+        self.assertEqual(result.output_total, 2)
+        statements = [call.args[0] for call in connection.execute.await_args_list]
+        self.assertTrue(any("UPDATE economy_inventory" in sql for sql in statements))
+        self.assertTrue(any("DELETE FROM economy_inventory" in sql for sql in statements))
+        self.assertIn("INSERT INTO economy_inventory", store._fetchone.await_args.args[1])
+        store._log.assert_called_once()
+
+    async def test_crafting_reports_every_missing_ingredient_without_mutation(self) -> None:
+        store = PostgresEconomyStore.__new__(PostgresEconomyStore)
+        connection = Mock()
+        connection.execute = AsyncMock()
+        store._connection = AsyncMock(return_value=_ConnectionContext(connection))
+        store._ensure_accounts = AsyncMock()
+        store._fetchall = AsyncMock(
+            return_value=[{"item_key": "scrap_wiring", "quantity": 1}]
+        )
+        store._fetchone = AsyncMock()
+        store._log = Mock()
+
+        result = await store.craft_inventory_item(
+            1,
+            2,
+            "insulated_cable",
+            1,
+            {"scrap_wiring": 3, "thermal_blanket": 1},
+            recipe_key="insulated_cable",
+            now=1_000,
+        )
+
+        self.assertEqual(result.status, "insufficient")
+        self.assertEqual(
+            {(entry.item_key, entry.quantity) for entry in result.missing},
+            {("scrap_wiring", 2), ("thermal_blanket", 1)},
+        )
+        connection.execute.assert_not_awaited()
+        store._fetchone.assert_not_awaited()
+        store._log.assert_not_called()
+
     async def test_consumable_is_removed_and_logged(self) -> None:
         store = PostgresEconomyStore.__new__(PostgresEconomyStore)
         connection = Mock()
@@ -151,6 +218,84 @@ class EconomyMarketTests(unittest.IsolatedAsyncioTestCase):
         statement = connection.execute.await_args.args[0]
         self.assertIn("UPDATE economy_equipment_charges", statement)
         self.assertNotIn("economy_inventory SET", statement)
+
+    async def test_timeout_restores_an_active_equipment_use(self) -> None:
+        store = PostgresEconomyStore.__new__(PostgresEconomyStore)
+        connection = Mock()
+        connection.execute = AsyncMock()
+        store._connection = AsyncMock(return_value=_ConnectionContext(connection))
+        store._ensure_accounts = AsyncMock()
+        store._fetchone = AsyncMock(
+            side_effect=[{"user_id": 2}, {"uses_remaining": 3}]
+        )
+        store._log = Mock()
+
+        restored = await store.restore_equipment_use(
+            1,
+            2,
+            "flashlight",
+            EquipmentUseResult("used", 3, False, 4),
+            source="dumpster_timeout",
+            now=1_000,
+        )
+
+        self.assertTrue(restored)
+        statement, parameters = connection.execute.await_args.args
+        self.assertIn("UPDATE economy_equipment_charges", statement)
+        self.assertEqual(parameters[0], 4)
+        store._log.assert_called_once()
+
+    async def test_timeout_returns_a_newly_activated_item_to_inventory(self) -> None:
+        store = PostgresEconomyStore.__new__(PostgresEconomyStore)
+        connection = Mock()
+        connection.execute = AsyncMock()
+        store._connection = AsyncMock(return_value=_ConnectionContext(connection))
+        store._ensure_accounts = AsyncMock()
+        store._fetchone = AsyncMock(
+            side_effect=[{"user_id": 2}, {"uses_remaining": 7}]
+        )
+        store._log = Mock()
+
+        restored = await store.restore_equipment_use(
+            1,
+            2,
+            "flashlight",
+            EquipmentUseResult("used", 7, True, 8),
+            source="dumpster_timeout",
+            now=1_000,
+        )
+
+        self.assertTrue(restored)
+        statements = [call.args[0] for call in connection.execute.await_args_list]
+        self.assertTrue(
+            any("DELETE FROM economy_equipment_charges" in sql for sql in statements)
+        )
+        self.assertTrue(any("INSERT INTO economy_inventory" in sql for sql in statements))
+        store._log.assert_called_once()
+
+    async def test_timeout_recreates_a_spent_final_equipment_charge(self) -> None:
+        store = PostgresEconomyStore.__new__(PostgresEconomyStore)
+        connection = Mock()
+        connection.execute = AsyncMock()
+        store._connection = AsyncMock(return_value=_ConnectionContext(connection))
+        store._ensure_accounts = AsyncMock()
+        store._fetchone = AsyncMock(side_effect=[{"user_id": 2}, None])
+        store._log = Mock()
+
+        restored = await store.restore_equipment_use(
+            1,
+            2,
+            "flashlight",
+            EquipmentUseResult("used", 0, False, 1),
+            source="dumpster_timeout",
+            now=1_000,
+        )
+
+        self.assertTrue(restored)
+        statement, _parameters = connection.execute.await_args.args
+        self.assertIn("INSERT INTO economy_equipment_charges", statement)
+        self.assertIn("VALUES (%s, %s, %s, 1, %s, %s)", statement)
+        store._log.assert_called_once()
 
     async def test_expired_orders_refund_each_buyer_and_are_logged(self) -> None:
         store = PostgresEconomyStore.__new__(PostgresEconomyStore)

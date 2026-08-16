@@ -142,6 +142,14 @@ class InventoryAwardResult:
 
 
 @dataclass(frozen=True)
+class CraftResult:
+    status: Literal["crafted", "insufficient", "invalid"]
+    output_quantity: int
+    output_total: int
+    missing: tuple[InventoryEntry, ...] = ()
+
+
+@dataclass(frozen=True)
 class InventoryTransferResult:
     status: Literal["transferred", "invalid", "insufficient"]
     quantity: int
@@ -1048,6 +1056,102 @@ class PostgresEconomyStore:
         )
         return result
 
+    async def craft_inventory_item(
+        self,
+        guild_id: int,
+        user_id: int,
+        output_key: str,
+        output_quantity: int,
+        ingredients: Mapping[str, int],
+        *,
+        recipe_key: str,
+        now: Optional[int] = None,
+    ) -> CraftResult:
+        """Atomically exchange recipe ingredients for an inventory item."""
+        timestamp = self._now(now)
+        output_key = str(output_key).strip()
+        output_quantity = int(output_quantity)
+        required = {
+            str(item_key): int(quantity)
+            for item_key, quantity in ingredients.items()
+            if item_key and int(quantity) > 0
+        }
+        if (
+            not output_key
+            or output_quantity <= 0
+            or output_quantity > MAX_MARKET_QUANTITY
+            or not required
+            or len(required) != len(ingredients)
+            or any(quantity > MAX_MARKET_QUANTITY for quantity in required.values())
+        ):
+            return CraftResult("invalid", output_quantity, 0)
+
+        ingredient_placeholders = ", ".join(["%s"] * len(required))
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            await self._ensure_accounts(connection, guild_id, user_id)
+            rows = await self._fetchall(
+                connection,
+                f"""SELECT item_key, quantity FROM economy_inventory
+                    WHERE guild_id = %s AND user_id = %s
+                      AND item_key IN ({ingredient_placeholders})
+                    FOR UPDATE""",
+                (guild_id, user_id, *required.keys()),
+            )
+            available = {
+                str(row["item_key"]): int(row["quantity"]) for row in rows
+            }
+            missing = tuple(
+                InventoryEntry(item_key, quantity - available.get(item_key, 0))
+                for item_key, quantity in required.items()
+                if available.get(item_key, 0) < quantity
+            )
+            if missing:
+                return CraftResult("insufficient", output_quantity, 0, missing)
+
+            for item_key, quantity in required.items():
+                remaining = available[item_key] - quantity
+                if remaining:
+                    await connection.execute(
+                        """UPDATE economy_inventory SET quantity = %s, updated_at = %s
+                           WHERE guild_id = %s AND user_id = %s AND item_key = %s""",
+                        (remaining, timestamp, guild_id, user_id, item_key),
+                    )
+                else:
+                    await connection.execute(
+                        """DELETE FROM economy_inventory
+                           WHERE guild_id = %s AND user_id = %s AND item_key = %s""",
+                        (guild_id, user_id, item_key),
+                    )
+
+            row = await self._fetchone(
+                connection,
+                """INSERT INTO economy_inventory
+                       (guild_id, user_id, item_key, quantity, first_acquired_at, updated_at)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (guild_id, user_id, item_key) DO UPDATE
+                   SET quantity = economy_inventory.quantity + EXCLUDED.quantity,
+                       updated_at = EXCLUDED.updated_at
+                   RETURNING quantity""",
+                (guild_id, user_id, output_key, output_quantity, timestamp, timestamp),
+            )
+            output_total = int(row["quantity"])
+
+        self._log(
+            "inventory_crafted",
+            guild_id,
+            user_id,
+            output_quantity,
+            None,
+            timestamp,
+            details={
+                "recipe_key": recipe_key,
+                "output_key": output_key,
+                "ingredients": required,
+            },
+        )
+        return CraftResult("crafted", output_quantity, output_total)
+
     async def transfer_inventory_item(
         self,
         guild_id: int,
@@ -1249,6 +1353,98 @@ class PostgresEconomyStore:
             "used", uses_remaining, activated_new,
             total_uses if activated_new else uses_remaining + 1,
         )
+
+    async def restore_equipment_use(
+        self,
+        guild_id: int,
+        user_id: int,
+        item_key: str,
+        equipment_use: EquipmentUseResult,
+        *,
+        source: str,
+        now: Optional[int] = None,
+    ) -> bool:
+        """Undo one equipment use when an activity times out."""
+        if equipment_use.status != "used" or not item_key:
+            return False
+
+        timestamp = self._now(now)
+        expected_uses = equipment_use.uses_remaining
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            await self._ensure_accounts(connection, guild_id, user_id)
+            await self._fetchone(
+                connection,
+                """SELECT user_id FROM economy_accounts
+                   WHERE guild_id = %s AND user_id = %s FOR UPDATE""",
+                (guild_id, user_id),
+            )
+            charge = await self._fetchone(
+                connection,
+                """SELECT uses_remaining FROM economy_equipment_charges
+                   WHERE guild_id = %s AND user_id = %s AND item_key = %s FOR UPDATE""",
+                (guild_id, user_id, item_key),
+            )
+            current_uses = None if charge is None else int(charge["uses_remaining"])
+
+            # Refuse to overwrite a charge changed by another activity.
+            if current_uses != (expected_uses if expected_uses > 0 else None):
+                return False
+
+            if equipment_use.activated_new:
+                if current_uses is not None:
+                    await connection.execute(
+                        """DELETE FROM economy_equipment_charges
+                           WHERE guild_id = %s AND user_id = %s AND item_key = %s""",
+                        (guild_id, user_id, item_key),
+                    )
+                await connection.execute(
+                    """INSERT INTO economy_inventory
+                           (guild_id, user_id, item_key, quantity,
+                            first_acquired_at, updated_at)
+                       VALUES (%s, %s, %s, 1, %s, %s)
+                       ON CONFLICT (guild_id, user_id, item_key) DO UPDATE
+                       SET quantity = economy_inventory.quantity + 1,
+                           updated_at = EXCLUDED.updated_at""",
+                    (guild_id, user_id, item_key, timestamp, timestamp),
+                )
+            elif current_uses is None:
+                await connection.execute(
+                    """INSERT INTO economy_equipment_charges
+                           (guild_id, user_id, item_key, uses_remaining,
+                            activated_at, updated_at)
+                       VALUES (%s, %s, %s, 1, %s, %s)""",
+                    (guild_id, user_id, item_key, timestamp, timestamp),
+                )
+            else:
+                await connection.execute(
+                    """UPDATE economy_equipment_charges
+                       SET uses_remaining = %s, updated_at = %s
+                       WHERE guild_id = %s AND user_id = %s AND item_key = %s""",
+                    (
+                        current_uses + 1,
+                        timestamp,
+                        guild_id,
+                        user_id,
+                        item_key,
+                    ),
+                )
+
+        self._log(
+            "inventory_equipment_use_restored",
+            guild_id,
+            user_id,
+            1,
+            None,
+            timestamp,
+            details={
+                "item_key": item_key,
+                "source": source,
+                "uses_remaining": expected_uses + 1,
+                "reactivated_inventory": equipment_use.activated_new,
+            },
+        )
+        return True
 
     async def sell_inventory_item(
         self,
