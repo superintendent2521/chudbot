@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import random
 import secrets
+from dataclasses import dataclass
 from typing import Any, Optional, cast
 
 from interactions import (
@@ -31,7 +32,6 @@ from chudbot.games.spaceflight_dumpster import (
     locations_for_equipment,
     lose_half,
     resolve_equipment,
-    resolve_loot,
     roll_loot,
 )
 
@@ -96,11 +96,16 @@ def _rarity_name(rarity: int) -> str:
     }.get(rarity, "Unknown")
 
 
+def _all_market_items() -> tuple[Any, ...]:
+    """Salvaged loot and crafted items share the same display attributes."""
+    return (*LOOT_BY_KEY.values(), *CRAFTED_ITEMS_BY_KEY.values())
+
+
 async def _send_item_autocomplete(ctx: AutocompleteContext) -> None:
     search = (ctx.input_text or "").strip().casefold()
     matches = [
         item
-        for item in LOOT_BY_KEY.values()
+        for item in _all_market_items()
         if not search
         or search in item.name.casefold()
         or search in item.key.casefold()
@@ -124,8 +129,52 @@ async def _send_equipment_autocomplete(ctx: AutocompleteContext) -> None:
     await send_ping(ctx, choices=choices[:25])
 
 
-async def _require_item(ctx: SlashContext, query: str):
-    item = resolve_loot(query)
+@dataclass(frozen=True)
+class MarketItem:
+    """A normalized item descriptor shared by salvaged loot and crafted items."""
+
+    key: str
+    name: str
+    emoji: str
+    rarity: Optional[int] = None
+    fixed_value: Optional[int] = None
+    crafted: bool = False
+
+
+def _resolve_market_item(query: str) -> Optional[MarketItem]:
+    display_name = query.strip().casefold()
+    normalized = display_name.replace(" ", "_")
+    for item in LOOT_BY_KEY.values():
+        if item.key.casefold() == normalized or item.name.casefold() == display_name:
+            return MarketItem(
+                item.key, item.name, item.emoji, item.rarity, item.coin_value, crafted=False
+            )
+    for item in CRAFTED_ITEMS_BY_KEY.values():
+        if item.key.casefold() == normalized or item.name.casefold() == display_name:
+            return MarketItem(item.key, item.name, item.emoji, None, None, crafted=True)
+    return None
+
+
+def _order_item_name(item_key: Optional[str]) -> str:
+    """Display name for a stored item key, from loot, crafted, or the raw key."""
+    key = item_key or ""
+    item = LOOT_BY_KEY.get(key)
+    if item is not None:
+        return item.name
+    crafted = CRAFTED_ITEMS_BY_KEY.get(key)
+    if crafted is not None:
+        return crafted.name
+    return key.replace("_", " ").title()
+
+
+def _automated_value_text(entry: MarketItem) -> str:
+    if entry.fixed_value is None:
+        return "No automated fixed price"
+    return f"{_format_coins(entry.fixed_value)} each"
+
+
+async def _require_item(ctx: SlashContext, query: str) -> Optional[MarketItem]:
+    item = _resolve_market_item(query)
     if item is None:
         await send_ping(ctx,
             "Unknown item. Use the item name shown by `/inventory`.",
@@ -263,6 +312,13 @@ def setup(handler: CommandHandler) -> None:
                 f"{'★' * item.rarity} — {_format_coins(item.coin_value)}{equipment_text}"
             )
         lines.append("All listed items can currently appear at each dumpster location.")
+        lines.append("\n🛠️ **Crafted Items** (player market only — no fixed auto-sell price)")
+        for item in sorted(CRAFTED_ITEMS_BY_KEY.values(), key=lambda value: value.name):
+            lines.append(f"{item.emoji} **{item.name}**")
+        lines.append(
+            "Craft these with `/craft`. They are tradable via `/transferitem` and can be "
+            "bought or sold between players with `/buyorder` and `/fillorder`."
+        )
         await send_ping(ctx, "\n".join(lines))
 
     @slash_command(name="transferitem", description="Transfer an inventory item to another user")
@@ -320,6 +376,14 @@ def setup(handler: CommandHandler) -> None:
             return
         loot = await _require_item(ctx, item)
         if loot is None:
+            return
+        if loot.crafted:
+            await send_ping(ctx,
+                f"🛠️ **{loot.name}** is a crafted item with no automated sale price. "
+                "Offer it to players with `/buyorder`, sell into an open order with "
+                "`/fillorder`, or trade it with `/transferitem`.",
+                ephemeral=True,
+            )
             return
         await defer_ping(ctx, ephemeral=loot.rarity >= 4 and quantity > 0)
         confirmation = None
@@ -466,8 +530,7 @@ def setup(handler: CommandHandler) -> None:
             return
         lines = ["📊 **Player Buy Orders**"]
         for order in orders:
-            order_item = LOOT_BY_KEY.get(order.item_key)
-            item_name = order_item.name if order_item is not None else order.item_key
+            item_name = _order_item_name(order.item_key)
             lines.append(
                 f"**Order ID: `{order.order_id}`** — "
                 f"{item_name} ×{order.quantity_remaining:,} — "
@@ -495,8 +558,7 @@ def setup(handler: CommandHandler) -> None:
         lines = ["📋 **Your Open Buy Orders**"]
         total_escrow = 0
         for order in orders:
-            loot = LOOT_BY_KEY.get(order.item_key)
-            item_name = loot.name if loot is not None else order.item_key
+            item_name = _order_item_name(order.item_key)
             escrow = order.quantity_remaining * order.price_each
             total_escrow += escrow
             lines.append(
@@ -532,7 +594,7 @@ def setup(handler: CommandHandler) -> None:
             )
             await send_ping(ctx,
                 f"📊 No player-market sales have completed for **{loot.name}** yet.\n"
-                f"Automated value: **{_format_coins(loot.coin_value)}**.{bid_text}"
+                f"Automated value: **{_automated_value_text(loot)}**.{bid_text}"
             )
             return
         total_quantity = sum(sale.quantity for sale in sales)
@@ -541,7 +603,7 @@ def setup(handler: CommandHandler) -> None:
         lines = [
             f"📊 **{loot.name} Price History**",
             f"Recent weighted average: **{_format_coins(average)} each**",
-            f"Automated value: **{_format_coins(loot.coin_value)} each**",
+            f"Automated value: **{_automated_value_text(loot)}**",
             (
                 f"Highest open bid: **{_format_coins(highest_bid)} each**"
                 if highest_bid is not None
@@ -584,8 +646,7 @@ def setup(handler: CommandHandler) -> None:
         elif result.status == "insufficient":
             await send_ping(ctx, "You do not have enough of that item.", ephemeral=True)
         else:
-            loot = LOOT_BY_KEY.get(result.item_key or "")
-            item_name = loot.name if loot is not None else result.item_key
+            item_name = _order_item_name(result.item_key)
             await send_ping(ctx,
                 f"🤝 Filled **{result.quantity:,}× {item_name}** on order "
                 f"**#{result.order_id}** for **{_format_coins(result.payout)}**. "
