@@ -1,7 +1,7 @@
 import unittest
 from random import Random
 
-from blackjack_game import hand_value, new_game, play_dealer, profit
+from chudbot.games.blackjack import hand_value, new_game, play_dealer, profit
 
 
 class BlackjackTests(unittest.TestCase):

@@ -2,7 +2,7 @@ import inspect
 import unittest
 from unittest.mock import AsyncMock, Mock
 
-from economy_store import (
+from chudbot.economy.store import (
     MAX_SECURITY_LEVEL,
     PostgresEconomyStore,
     rob_success_chance,

@@ -1,0 +1,5 @@
+aiohttp>=3.9,<4
+discord-py-interactions>=5,<6
+lavalink>=5,<6
+psycopg[binary,pool]>=3.2,<4
+python-dotenv>=1,<2

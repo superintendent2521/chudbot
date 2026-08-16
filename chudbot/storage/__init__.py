@@ -1,0 +1,1 @@
+"""Small persistent configuration stores."""

@@ -40,8 +40,8 @@ if "lavalink.filters" not in sys.modules:
     setattr(lavalink, "filters", filters)
     sys.modules["lavalink.filters"] = filters
 
-from music_manager import MusicManager
-from music_filters import AudioNormalization
+from chudbot.music.manager import MusicManager
+from chudbot.music.filters import AudioNormalization
 
 
 class MusicManagerNormalizationTests(unittest.IsolatedAsyncioTestCase):

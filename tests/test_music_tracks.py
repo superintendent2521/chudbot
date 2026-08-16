@@ -10,8 +10,8 @@ if "lavalink" not in sys.modules:
     setattr(lavalink, "errors", types.SimpleNamespace(ClientError=RuntimeError))
     sys.modules["lavalink"] = lavalink
 
-from music_errors import MusicError
-from music_tracks import TrackLoader
+from chudbot.music.errors import MusicError
+from chudbot.music.tracks import TrackLoader
 
 
 class TrackLoaderParsingTests(unittest.TestCase):

@@ -1,0 +1,1 @@
+"""Chudbot Discord bot package."""

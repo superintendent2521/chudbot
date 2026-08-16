@@ -1,6 +1,6 @@
 import unittest
 
-from message_reward_buffer import MessageRewardBuffer
+from chudbot.economy.reward_buffer import MessageRewardBuffer
 
 
 class MessageRewardBufferTests(unittest.TestCase):

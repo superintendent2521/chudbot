@@ -18,7 +18,7 @@ if "interactions" not in sys.modules:
     sys.modules["interactions.api.events"] = interactions_events
     sys.modules["interactions.api.events.discord"] = interactions_discord
 
-from fixupx_link_listener import (
+from chudbot.listeners.fixupx import (
     _extract_status_id,
     _status_has_video,
     create_fixupx_listener,
@@ -98,8 +98,8 @@ class FixupXListenerTests(unittest.IsolatedAsyncioTestCase):
         listener = create_fixupx_listener(Mock())[0]
 
         with (
-            patch("fixupx_link_listener.aiohttp.ClientSession", FakeClientSession),
-            patch("fixupx_link_listener._tweet_has_video", AsyncMock(return_value=False)),
+            patch("chudbot.listeners.fixupx.aiohttp.ClientSession", FakeClientSession),
+            patch("chudbot.listeners.fixupx._tweet_has_video", AsyncMock(return_value=False)),
         ):
             await listener(event)
 
@@ -110,8 +110,8 @@ class FixupXListenerTests(unittest.IsolatedAsyncioTestCase):
         listener = create_fixupx_listener(Mock())[0]
 
         with (
-            patch("fixupx_link_listener.aiohttp.ClientSession", FakeClientSession),
-            patch("fixupx_link_listener._tweet_has_video", AsyncMock(return_value=True)),
+            patch("chudbot.listeners.fixupx.aiohttp.ClientSession", FakeClientSession),
+            patch("chudbot.listeners.fixupx._tweet_has_video", AsyncMock(return_value=True)),
         ):
             await listener(event)
 

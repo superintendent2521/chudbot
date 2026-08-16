@@ -1,7 +1,7 @@
 import random
 import unittest
 
-from spaceflight_dumpster import (
+from chudbot.games.spaceflight_dumpster import (
     EQUIPMENT_BY_KEY,
     LOCATIONS,
     LOOT,
@@ -47,7 +47,7 @@ class SpaceflightDumpsterTests(unittest.TestCase):
 
     def test_item_resolution_accepts_keys_and_display_names(self) -> None:
         self.assertEqual(resolve_loot("ball_valve"), resolve_loot("Ball Valve"))
-        self.assertEqual(resolve_loot("s36_copv").key, "S36_COPV")
+        self.assertEqual(resolve_loot("s36_copv").key, "S36_COPV") # type: ignore
         self.assertIsNone(resolve_loot("not real"))
 
     def test_gloves_reduce_hazard_chance(self) -> None:

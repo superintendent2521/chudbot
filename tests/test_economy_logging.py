@@ -1,9 +1,10 @@
 import asyncio
 import logging
 import unittest
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, Mock
 
-from economy_logging import EconomyLogRecord, EconomyLogWriter
+from chudbot.economy.logging import EconomyLogRecord, EconomyLogWriter
 
 
 class _ActiveTask:
@@ -45,6 +46,40 @@ class EconomyLogWriterTests(unittest.TestCase):
 
 
 class EconomyLogBatchingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_write_batch_uses_fixed_query_and_parameter_rows(self) -> None:
+        connection = SimpleNamespace(executemany=AsyncMock())
+        connection_context = MagicMock()
+        connection_context.__aenter__ = AsyncMock(return_value=connection)
+        connection_context.__aexit__ = AsyncMock(return_value=None)
+
+        writer = EconomyLogWriter.__new__(EconomyLogWriter)
+        writer._pool = SimpleNamespace(
+            connection=Mock(return_value=connection_context)
+        )
+        records = [
+            EconomyLogRecord("work", 1, 2, 10, 260, 123),
+            EconomyLogRecord(
+                "gift",
+                1,
+                3,
+                -5,
+                95,
+                124,
+                counterparty_id=4,
+                counterparty_balance_after=205,
+                details={"note": "thanks"},
+            ),
+        ]
+
+        await writer._write_batch(records)
+
+        query, rows = connection.executemany.await_args.args
+        self.assertIn("INSERT INTO economy_log", query)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][:8], ("work", 1, 2, None, 10, 260, None, 123))
+        self.assertEqual(rows[0][8], "{}")
+        self.assertEqual(rows[1][8], '{"note":"thanks"}')
+
     async def test_sparse_logs_wait_for_flush_interval(self) -> None:
         writer = EconomyLogWriter.__new__(EconomyLogWriter)
         writer._queue = asyncio.Queue(maxsize=10)
