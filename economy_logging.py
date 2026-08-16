@@ -147,7 +147,7 @@ class EconomyLogWriter:
             ["(%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)"] * len(batch)
         )
         parameters: list[Any] = []
-        print("Writing batch of %s economy log records", len(batch))
+        print(f"Writing batch of {len(batch)} economy log records")
         for record in batch:
             data = asdict(record)
             parameters.extend(

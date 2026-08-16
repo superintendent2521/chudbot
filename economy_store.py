@@ -19,10 +19,12 @@ LOAN_TERM_SECONDS = 60 * 60
 MAX_LOAN_AMOUNT = 5_000
 MAX_MARKET_QUANTITY = 1_000_000
 MAX_MARKET_PRICE = 1_000_000_000
+MAX_OPEN_BUY_ORDERS = 20
+BUY_ORDER_TTL_SECONDS = 7 * 24 * 60 * 60
 FISH_COOLDOWN_SECONDS = 5 * 60
 MEMORY_COOLDOWN_SECONDS = 5 * 60
 BOUNTY_COOLDOWN_SECONDS = 10 * 60
-DUMPSTER_COOLDOWN_SECONDS = 10 * 60
+DUMPSTER_COOLDOWN_SECONDS = 5 * 60
 DEFAULT_POSTGRES_URL = "postgresql://postgres:postgres@postgres/economy"
 BASE_ROB_SUCCESS_PERCENT = 45.0
 MAX_SECURITY_LEVEL = 20
@@ -125,6 +127,7 @@ class EconomyStatistics:
     highest_balance: int
     queued_logs: int
     dropped_logs: int
+    escrowed_coins: int
 
 
 @dataclass(frozen=True)
@@ -146,6 +149,27 @@ class InventoryTransferResult:
 
 
 @dataclass(frozen=True)
+class InventoryConsumeResult:
+    status: Literal["consumed", "invalid", "insufficient"]
+    quantity: int
+    remaining: int
+
+
+@dataclass(frozen=True)
+class EquipmentAvailability:
+    inventory_quantity: int
+    uses_remaining: int
+
+
+@dataclass(frozen=True)
+class EquipmentUseResult:
+    status: Literal["used", "invalid", "insufficient"]
+    uses_remaining: int
+    activated_new: bool
+    total_uses: int
+
+
+@dataclass(frozen=True)
 class InventorySaleResult:
     status: Literal["sold", "invalid", "insufficient"]
     quantity: int
@@ -156,7 +180,7 @@ class InventorySaleResult:
 
 @dataclass(frozen=True)
 class BuyOrderResult:
-    status: Literal["created", "insufficient", "invalid"]
+    status: Literal["created", "insufficient", "invalid", "limit"]
     order_id: Optional[int]
     quantity: int
     price_each: int
@@ -170,6 +194,18 @@ class BuyOrderEntry:
     item_key: str
     quantity_remaining: int
     price_each: int
+    expires_at: int
+
+
+@dataclass(frozen=True)
+class MarketSaleEntry:
+    order_id: int
+    buyer_id: int
+    seller_id: int
+    item_key: str
+    quantity: int
+    price_each: int
+    sold_at: int
 
 
 @dataclass(frozen=True)
@@ -370,6 +406,19 @@ class PostgresEconomyStore:
             )
             await connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS economy_equipment_charges (
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    uses_remaining BIGINT NOT NULL CHECK (uses_remaining > 0),
+                    activated_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (guild_id, user_id, item_key)
+                )
+                """
+            )
+            await connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS economy_buy_orders (
                     id BIGSERIAL PRIMARY KEY,
                     guild_id BIGINT NOT NULL,
@@ -381,13 +430,59 @@ class PostgresEconomyStore:
                     status TEXT NOT NULL DEFAULT 'open'
                         CHECK (status IN ('open', 'filled', 'cancelled')),
                     created_at BIGINT NOT NULL,
-                    updated_at BIGINT NOT NULL
+                    updated_at BIGINT NOT NULL,
+                    expires_at BIGINT
+                )
+                """
+            )
+            await connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS economy_inventory_settings (
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    is_private BOOLEAN NOT NULL DEFAULT FALSE,
+                    PRIMARY KEY (guild_id, user_id)
                 )
                 """
             )
             await connection.execute(
                 """CREATE INDEX IF NOT EXISTS economy_buy_orders_market_idx
                    ON economy_buy_orders (guild_id, status, item_key, price_each DESC)"""
+            )
+            await connection.execute(
+                "ALTER TABLE economy_buy_orders ADD COLUMN IF NOT EXISTS expires_at BIGINT"
+            )
+            await connection.execute(
+                """UPDATE economy_buy_orders
+                   SET expires_at = created_at + %s WHERE expires_at IS NULL""",
+                (BUY_ORDER_TTL_SECONDS,),
+            )
+            await connection.execute(
+                """ALTER TABLE economy_buy_orders
+                   ALTER COLUMN expires_at SET NOT NULL"""
+            )
+            await connection.execute(
+                """CREATE INDEX IF NOT EXISTS economy_buy_orders_expiry_idx
+                   ON economy_buy_orders (guild_id, status, expires_at)"""
+            )
+            await connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS economy_market_sales (
+                    id BIGSERIAL PRIMARY KEY,
+                    order_id BIGINT NOT NULL,
+                    guild_id BIGINT NOT NULL,
+                    buyer_id BIGINT NOT NULL,
+                    seller_id BIGINT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    quantity BIGINT NOT NULL CHECK (quantity > 0),
+                    price_each BIGINT NOT NULL CHECK (price_each > 0),
+                    sold_at BIGINT NOT NULL
+                )
+                """
+            )
+            await connection.execute(
+                """CREATE INDEX IF NOT EXISTS economy_market_sales_history_idx
+                   ON economy_market_sales (guild_id, item_key, sold_at DESC)"""
             )
 
     def _log(
@@ -538,7 +633,11 @@ class PostgresEconomyStore:
                           COUNT(*) AS accounts,
                           COALESCE(SUM(balance), 0) AS total_balance,
                           COALESCE(ROUND(AVG(balance)), 0) AS average_balance,
-                          COALESCE(MAX(balance), 0) AS highest_balance
+                          COALESCE(MAX(balance), 0) AS highest_balance,
+                          COALESCE((
+                              SELECT SUM(quantity_remaining * price_each)
+                              FROM economy_buy_orders WHERE status = 'open'
+                          ), 0) AS escrowed_coins
                    FROM economy_accounts""",
                 (),
             )
@@ -550,6 +649,7 @@ class PostgresEconomyStore:
                 highest_balance=int(row["highest_balance"]),
                 queued_logs=self._log_writer.queued,
                 dropped_logs=self._log_writer.dropped,
+                escrowed_coins=int(row["escrowed_coins"]),
             )
 
     async def work(
@@ -827,6 +927,70 @@ class PostgresEconomyStore:
             InventoryEntry(str(row["item_key"]), int(row["quantity"])) for row in rows
         )
 
+    async def equipment_uses(
+        self, guild_id: int, user_id: int
+    ) -> tuple[InventoryEntry, ...]:
+        """Return activated equipment and its remaining dumpster uses."""
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            rows = await self._fetchall(
+                connection,
+                """SELECT item_key, uses_remaining AS quantity
+                   FROM economy_equipment_charges
+                   WHERE guild_id = %s AND user_id = %s
+                   ORDER BY uses_remaining DESC, item_key ASC""",
+                (guild_id, user_id),
+            )
+        return tuple(
+            InventoryEntry(str(row["item_key"]), int(row["quantity"])) for row in rows
+        )
+
+    async def equipment_availability(
+        self, guild_id: int, user_id: int, item_key: str
+    ) -> EquipmentAvailability:
+        """Check stored items and active uses in one database round trip."""
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            row = await self._fetchone(
+                connection,
+                """SELECT
+                       COALESCE((SELECT quantity FROM economy_inventory
+                         WHERE guild_id = %s AND user_id = %s AND item_key = %s), 0)
+                           AS inventory_quantity,
+                       COALESCE((SELECT uses_remaining FROM economy_equipment_charges
+                         WHERE guild_id = %s AND user_id = %s AND item_key = %s), 0)
+                           AS uses_remaining""",
+                (guild_id, user_id, item_key, guild_id, user_id, item_key),
+            )
+        return EquipmentAvailability(
+            int(row["inventory_quantity"]), int(row["uses_remaining"])
+        )
+
+    async def inventory_is_private(self, guild_id: int, user_id: int) -> bool:
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            row = await self._fetchone(
+                connection,
+                """SELECT is_private FROM economy_inventory_settings
+                   WHERE guild_id = %s AND user_id = %s""",
+                (guild_id, user_id),
+            )
+        return False if row is None else bool(row["is_private"])
+
+    async def set_inventory_private(
+        self, guild_id: int, user_id: int, is_private: bool
+    ) -> bool:
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            await connection.execute(
+                """INSERT INTO economy_inventory_settings (guild_id, user_id, is_private)
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT (guild_id, user_id) DO UPDATE
+                   SET is_private = EXCLUDED.is_private""",
+                (guild_id, user_id, bool(is_private)),
+            )
+        return bool(is_private)
+
     async def add_inventory_items(
         self,
         guild_id: int,
@@ -941,6 +1105,151 @@ class PostgresEconomyStore:
         )
         return InventoryTransferResult("transferred", quantity, remaining)
 
+    async def consume_inventory_item(
+        self,
+        guild_id: int,
+        user_id: int,
+        item_key: str,
+        quantity: int = 1,
+        *,
+        source: str,
+        now: Optional[int] = None,
+    ) -> InventoryConsumeResult:
+        """Atomically remove consumable inventory for an activity."""
+        timestamp = self._now(now)
+        quantity = int(quantity)
+        if quantity <= 0 or quantity > MAX_MARKET_QUANTITY:
+            return InventoryConsumeResult("invalid", quantity, 0)
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            row = await self._fetchone(
+                connection,
+                """SELECT quantity FROM economy_inventory
+                   WHERE guild_id = %s AND user_id = %s AND item_key = %s FOR UPDATE""",
+                (guild_id, user_id, item_key),
+            )
+            available = 0 if row is None else int(row["quantity"])
+            if available < quantity:
+                return InventoryConsumeResult("insufficient", quantity, available)
+            remaining = available - quantity
+            if remaining:
+                await connection.execute(
+                    """UPDATE economy_inventory SET quantity = %s, updated_at = %s
+                       WHERE guild_id = %s AND user_id = %s AND item_key = %s""",
+                    (remaining, timestamp, guild_id, user_id, item_key),
+                )
+            else:
+                await connection.execute(
+                    """DELETE FROM economy_inventory
+                       WHERE guild_id = %s AND user_id = %s AND item_key = %s""",
+                    (guild_id, user_id, item_key),
+                )
+        self._log(
+            "inventory_consumed", guild_id, user_id, quantity, None, timestamp,
+            details={"item_key": item_key, "source": source},
+        )
+        return InventoryConsumeResult("consumed", quantity, remaining)
+
+    async def use_inventory_equipment(
+        self,
+        guild_id: int,
+        user_id: int,
+        item_key: str,
+        total_uses: int,
+        *,
+        source: str,
+        now: Optional[int] = None,
+    ) -> EquipmentUseResult:
+        """Spend one active use, activating one inventory item when necessary."""
+        timestamp = self._now(now)
+        total_uses = int(total_uses)
+        if not item_key or total_uses < 1 or total_uses > 100:
+            return EquipmentUseResult("invalid", 0, False, total_uses)
+
+        activated_new = False
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            await self._ensure_accounts(connection, guild_id, user_id)
+            # Serialize first activation when no charge row exists yet.
+            await self._fetchone(
+                connection,
+                """SELECT user_id FROM economy_accounts
+                   WHERE guild_id = %s AND user_id = %s FOR UPDATE""",
+                (guild_id, user_id),
+            )
+            charge = await self._fetchone(
+                connection,
+                """SELECT uses_remaining FROM economy_equipment_charges
+                   WHERE guild_id = %s AND user_id = %s AND item_key = %s FOR UPDATE""",
+                (guild_id, user_id, item_key),
+            )
+            if charge is not None:
+                uses_remaining = int(charge["uses_remaining"]) - 1
+                if uses_remaining > 0:
+                    await connection.execute(
+                        """UPDATE economy_equipment_charges
+                           SET uses_remaining = %s, updated_at = %s
+                           WHERE guild_id = %s AND user_id = %s AND item_key = %s""",
+                        (uses_remaining, timestamp, guild_id, user_id, item_key),
+                    )
+                else:
+                    await connection.execute(
+                        """DELETE FROM economy_equipment_charges
+                           WHERE guild_id = %s AND user_id = %s AND item_key = %s""",
+                        (guild_id, user_id, item_key),
+                    )
+            else:
+                inventory = await self._fetchone(
+                    connection,
+                    """SELECT quantity FROM economy_inventory
+                       WHERE guild_id = %s AND user_id = %s AND item_key = %s FOR UPDATE""",
+                    (guild_id, user_id, item_key),
+                )
+                available = 0 if inventory is None else int(inventory["quantity"])
+                if available < 1:
+                    return EquipmentUseResult("insufficient", 0, False, total_uses)
+                activated_new = True
+                inventory_remaining = available - 1
+                if inventory_remaining > 0:
+                    await connection.execute(
+                        """UPDATE economy_inventory SET quantity = %s, updated_at = %s
+                           WHERE guild_id = %s AND user_id = %s AND item_key = %s""",
+                        (inventory_remaining, timestamp, guild_id, user_id, item_key),
+                    )
+                else:
+                    await connection.execute(
+                        """DELETE FROM economy_inventory
+                           WHERE guild_id = %s AND user_id = %s AND item_key = %s""",
+                        (guild_id, user_id, item_key),
+                    )
+                uses_remaining = total_uses - 1
+                if uses_remaining > 0:
+                    await connection.execute(
+                        """INSERT INTO economy_equipment_charges
+                               (guild_id, user_id, item_key, uses_remaining,
+                                activated_at, updated_at)
+                           VALUES (%s, %s, %s, %s, %s, %s)""",
+                        (
+                            guild_id, user_id, item_key, uses_remaining,
+                            timestamp, timestamp,
+                        ),
+                    )
+
+        self._log(
+            "inventory_equipment_used", guild_id, user_id, 1, None, timestamp,
+            details={
+                "item_key": item_key,
+                "source": source,
+                "uses_remaining": uses_remaining,
+                "activated_new": activated_new,
+                "total_uses": total_uses if activated_new else None,
+            },
+        )
+        return EquipmentUseResult(
+            "used", uses_remaining, activated_new,
+            total_uses if activated_new else uses_remaining + 1,
+        )
+
     async def sell_inventory_item(
         self,
         guild_id: int,
@@ -1025,6 +1334,7 @@ class PostgresEconomyStore:
     ) -> BuyOrderResult:
         """Create a fully escrowed player buy order."""
         timestamp = self._now(now)
+        await self.expire_buy_orders(guild_id, now=timestamp)
         quantity = int(quantity)
         price_each = int(price_each)
         connection_context = await self._connection()
@@ -1044,6 +1354,14 @@ class PostgresEconomyStore:
                 or price_each > MAX_MARKET_PRICE
             ):
                 return BuyOrderResult("invalid", None, quantity, price_each, balance)
+            open_count_row = await self._fetchone(
+                connection,
+                """SELECT COUNT(*) AS open_count FROM economy_buy_orders
+                   WHERE guild_id = %s AND buyer_id = %s AND status = 'open'""",
+                (guild_id, buyer_id),
+            )
+            if int(open_count_row["open_count"]) >= MAX_OPEN_BUY_ORDERS:
+                return BuyOrderResult("limit", None, quantity, price_each, balance)
             escrow = quantity * price_each
             if balance < escrow:
                 return BuyOrderResult("insufficient", None, quantity, price_each, balance)
@@ -1056,13 +1374,13 @@ class PostgresEconomyStore:
             order_row = await self._fetchone(
                 connection,
                 """INSERT INTO economy_buy_orders
-                       (guild_id, buyer_id, item_key, quantity_original,
-                        quantity_remaining, price_each, created_at, updated_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        (guild_id, buyer_id, item_key, quantity_original,
+                        quantity_remaining, price_each, created_at, updated_at, expires_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                    RETURNING id""",
                 (
                     guild_id, buyer_id, item_key, quantity, quantity,
-                    price_each, timestamp, timestamp,
+                    price_each, timestamp, timestamp, timestamp + BUY_ORDER_TTL_SECONDS,
                 ),
             )
             result = BuyOrderResult(
@@ -1081,34 +1399,101 @@ class PostgresEconomyStore:
         return result
 
     async def buy_orders(
-        self, guild_id: int, *, item_key: Optional[str] = None, limit: int = 15
+        self,
+        guild_id: int,
+        *,
+        item_key: Optional[str] = None,
+        buyer_id: Optional[int] = None,
+        limit: int = 15,
+        now: Optional[int] = None,
     ) -> tuple[BuyOrderEntry, ...]:
         """List the highest-paying open buy orders in a guild."""
+        timestamp = self._now(now)
+        await self.expire_buy_orders(guild_id, now=timestamp)
         limit = max(1, min(50, int(limit)))
-        parameters: tuple[Any, ...]
-        item_filter = ""
-        if item_key is None:
-            parameters = (guild_id, limit)
-        else:
-            item_filter = " AND item_key = %s"
-            parameters = (guild_id, item_key, limit)
+        filters = ["guild_id = %s", "status = 'open'", "expires_at > %s"]
+        parameters: list[Any] = [guild_id, timestamp]
+        if item_key is not None:
+            filters.append("item_key = %s")
+            parameters.append(item_key)
+        if buyer_id is not None:
+            filters.append("buyer_id = %s")
+            parameters.append(buyer_id)
+        parameters.append(limit)
         connection_context = await self._connection()
         async with connection_context as connection:
             rows = await self._fetchall(
                 connection,
-                f"""SELECT id, buyer_id, item_key, quantity_remaining, price_each
+                f"""SELECT id, buyer_id, item_key, quantity_remaining, price_each,
+                           expires_at
                     FROM economy_buy_orders
-                    WHERE guild_id = %s AND status = 'open'{item_filter}
+                    WHERE {' AND '.join(filters)}
                     ORDER BY price_each DESC, created_at ASC LIMIT %s""",
-                parameters,
+                tuple(parameters),
             )
         return tuple(
             BuyOrderEntry(
                 int(row["id"]), int(row["buyer_id"]), str(row["item_key"]),
                 int(row["quantity_remaining"]), int(row["price_each"]),
+                int(row["expires_at"]),
             )
             for row in rows
         )
+
+    async def expire_buy_orders(
+        self, guild_id: int, *, now: Optional[int] = None
+    ) -> int:
+        """Refund and close expired orders; safe to call from market read paths."""
+        timestamp = self._now(now)
+        connection_context = await self._connection()
+        refunds: dict[int, int] = {}
+        order_ids_by_buyer: dict[int, list[int]] = {}
+        async with connection_context as connection:
+            rows = await self._fetchall(
+                connection,
+                """SELECT id, buyer_id, quantity_remaining, price_each
+                   FROM economy_buy_orders
+                   WHERE guild_id = %s AND status = 'open' AND expires_at <= %s
+                   ORDER BY buyer_id, id FOR UPDATE""",
+                (guild_id, timestamp),
+            )
+            if not rows:
+                return 0
+            order_ids = [int(row["id"]) for row in rows]
+            for row in rows:
+                buyer_id = int(row["buyer_id"])
+                refunds[buyer_id] = refunds.get(buyer_id, 0) + (
+                    int(row["quantity_remaining"]) * int(row["price_each"])
+                )
+                order_ids_by_buyer.setdefault(buyer_id, []).append(int(row["id"]))
+            placeholders = ", ".join(["%s"] * len(order_ids))
+            await connection.execute(
+                f"""UPDATE economy_buy_orders
+                    SET quantity_remaining = 0, status = 'cancelled', updated_at = %s
+                    WHERE id IN ({placeholders})""",
+                (timestamp, *order_ids),
+            )
+            buyer_ids = sorted(refunds)
+            await self._ensure_accounts(connection, guild_id, *buyer_ids)
+            await self._fetchall(
+                connection,
+                f"""SELECT user_id FROM economy_accounts
+                    WHERE guild_id = %s AND user_id IN ({', '.join(['%s'] * len(buyer_ids))})
+                    ORDER BY user_id FOR UPDATE""",
+                (guild_id, *buyer_ids),
+            )
+            for buyer_id in buyer_ids:
+                await connection.execute(
+                    """UPDATE economy_accounts SET balance = balance + %s
+                       WHERE guild_id = %s AND user_id = %s""",
+                    (refunds[buyer_id], guild_id, buyer_id),
+                )
+        for buyer_id, refund in refunds.items():
+            self._log(
+                "buy_order_expired", guild_id, buyer_id, refund, None, timestamp,
+                details={"order_ids": order_ids_by_buyer[buyer_id]},
+            )
+        return len(rows)
 
     async def fill_buy_order(
         self,
@@ -1121,6 +1506,7 @@ class PostgresEconomyStore:
     ) -> FillBuyOrderResult:
         """Sell inventory into an escrowed buy order atomically."""
         timestamp = self._now(now)
+        await self.expire_buy_orders(guild_id, now=timestamp)
         order_id = int(order_id)
         quantity = int(quantity)
         if quantity <= 0 or quantity > MAX_MARKET_QUANTITY:
@@ -1203,6 +1589,16 @@ class PostgresEconomyStore:
                    WHERE guild_id = %s AND user_id = %s RETURNING balance""",
                 (payout, timestamp, guild_id, seller_id),
             )
+            await connection.execute(
+                """INSERT INTO economy_market_sales
+                       (order_id, guild_id, buyer_id, seller_id, item_key,
+                        quantity, price_each, sold_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                (
+                    order_id, guild_id, buyer_id, seller_id, item_key,
+                    quantity, int(order["price_each"]), timestamp,
+                ),
+            )
             result = FillBuyOrderResult(
                 "filled", order_id, buyer_id, item_key, quantity, payout,
                 int(balance_row["balance"]), order_remaining,
@@ -1228,6 +1624,7 @@ class PostgresEconomyStore:
     ) -> CancelBuyOrderResult:
         """Cancel a user's open order and refund all unfilled escrow."""
         timestamp = self._now(now)
+        await self.expire_buy_orders(guild_id, now=timestamp)
         order_id = int(order_id)
         connection_context = await self._connection()
         async with connection_context as connection:
@@ -1270,6 +1667,35 @@ class PostgresEconomyStore:
             result.balance, timestamp, details={"order_id": order_id},
         )
         return result
+
+    async def market_sales(
+        self,
+        guild_id: int,
+        item_key: str,
+        *,
+        limit: int = 10,
+    ) -> tuple[MarketSaleEntry, ...]:
+        """Return recent completed player-market sales for an item."""
+        limit = max(1, min(25, int(limit)))
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            rows = await self._fetchall(
+                connection,
+                """SELECT order_id, buyer_id, seller_id, item_key, quantity,
+                          price_each, sold_at
+                   FROM economy_market_sales
+                   WHERE guild_id = %s AND item_key = %s
+                   ORDER BY sold_at DESC, id DESC LIMIT %s""",
+                (guild_id, item_key, limit),
+            )
+        return tuple(
+            MarketSaleEntry(
+                int(row["order_id"]), int(row["buyer_id"]), int(row["seller_id"]),
+                str(row["item_key"]), int(row["quantity"]),
+                int(row["price_each"]), int(row["sold_at"]),
+            )
+            for row in rows
+        )
 
     async def start_activity(
         self,

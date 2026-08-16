@@ -2,9 +2,11 @@ import random
 import unittest
 
 from spaceflight_dumpster import (
+    EQUIPMENT_BY_KEY,
     LOCATIONS,
     LOOT,
     hazard_chance,
+    locations_for_equipment,
     lose_half,
     resolve_loot,
     roll_loot,
@@ -47,6 +49,26 @@ class SpaceflightDumpsterTests(unittest.TestCase):
         self.assertEqual(resolve_loot("ball_valve"), resolve_loot("Ball Valve"))
         self.assertEqual(resolve_loot("s36_copv").key, "S36_COPV")
         self.assertIsNone(resolve_loot("not real"))
+
+    def test_gloves_reduce_hazard_chance(self) -> None:
+        gloves = EQUIPMENT_BY_KEY["spacesuit_glove"]
+        base = hazard_chance(LOCATIONS[1], deep=True)
+        protected = hazard_chance(
+            LOCATIONS[1], deep=True, hazard_reduction=gloves.hazard_reduction
+        )
+        self.assertAlmostEqual(protected, base - 0.10)
+
+    def test_access_card_unlocks_one_special_location(self) -> None:
+        access_card = EQUIPMENT_BY_KEY["access_card"]
+        self.assertEqual(len(locations_for_equipment(None)), len(LOCATIONS))
+        self.assertEqual(len(locations_for_equipment(access_card)), len(LOCATIONS) + 1)
+
+    def test_toolbox_adds_one_round(self) -> None:
+        self.assertEqual(EQUIPMENT_BY_KEY["toolbox"].extra_rounds, 1)
+
+    def test_every_equipment_key_is_real_loot(self) -> None:
+        loot_keys = {item.key for item in LOOT}
+        self.assertLessEqual(set(EQUIPMENT_BY_KEY), loot_keys)
 
 
 if __name__ == "__main__":
