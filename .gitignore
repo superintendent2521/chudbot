@@ -1,6 +1,5 @@
 .env
 __pycache__/
 *.pyc
-data/reaction_roles.json
+data/*.json
 economy.db*
-data/warns.json

@@ -160,10 +160,11 @@ class EconomyLogWriter:
                 )
             )
         async with self._pool.connection(timeout=2) as connection:
-            await connection.executemany(
-                """INSERT INTO economy_log
-                    (event_type, guild_id, user_id, counterparty_id, amount,
-                     balance_after, counterparty_balance_after, occurred_at, details)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)""",
-                parameters,
-            )
+            async with connection.cursor() as cursor:
+                await cursor.executemany(
+                    """INSERT INTO economy_log
+                        (event_type, guild_id, user_id, counterparty_id, amount,
+                         balance_after, counterparty_balance_after, occurred_at, details)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)""",
+                    parameters,
+                )

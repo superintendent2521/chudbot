@@ -47,7 +47,11 @@ class EconomyLogWriterTests(unittest.TestCase):
 
 class EconomyLogBatchingTests(unittest.IsolatedAsyncioTestCase):
     async def test_write_batch_uses_fixed_query_and_parameter_rows(self) -> None:
-        connection = SimpleNamespace(executemany=AsyncMock())
+        cursor = SimpleNamespace(executemany=AsyncMock())
+        cursor_context = MagicMock()
+        cursor_context.__aenter__ = AsyncMock(return_value=cursor)
+        cursor_context.__aexit__ = AsyncMock(return_value=None)
+        connection = SimpleNamespace(cursor=Mock(return_value=cursor_context))
         connection_context = MagicMock()
         connection_context.__aenter__ = AsyncMock(return_value=connection)
         connection_context.__aexit__ = AsyncMock(return_value=None)
@@ -73,7 +77,7 @@ class EconomyLogBatchingTests(unittest.IsolatedAsyncioTestCase):
 
         await writer._write_batch(records)
 
-        query, rows = connection.executemany.await_args.args
+        query, rows = cursor.executemany.await_args.args
         self.assertIn("INSERT INTO economy_log", query)
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0][:8], ("work", 1, 2, None, 10, 260, None, 123))
