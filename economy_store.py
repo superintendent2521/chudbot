@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
+
+from economy_logging import EconomyLogRecord, EconomyLogWriter
 
 
 STARTING_BALANCE = 250
@@ -144,6 +147,8 @@ class PostgresEconomyStore:
         *,
         min_pool_size: int = 5,
         max_pool_size: int = 10,
+        log_queue_size: int = 10_000,
+        log_batch_size: int = 100,
     ) -> None:
         if not database_url:
             raise ValueError("A PostgreSQL database URL is required")
@@ -172,6 +177,11 @@ class PostgresEconomyStore:
         )
         self._open_lock = asyncio.Lock()
         self._opened = False
+        self._log_writer = EconomyLogWriter(
+            database_url,
+            queue_size=log_queue_size,
+            batch_size=log_batch_size,
+        )
 
     async def open(self) -> None:
         """Open the pool and apply idempotent schema migrations once."""
@@ -183,9 +193,18 @@ class PostgresEconomyStore:
             await self._pool.open(wait=True, timeout=30)
             await self._initialize()
             self._opened = True
+            try:
+                await self._log_writer.start()
+            except Exception:
+                # Audit logging is explicitly lower priority than the economy.
+                # A logger outage must not prevent the store from opening.
+                logging.getLogger("chuds.bot.economy-log").exception(
+                    "Economy audit logger unavailable; economy remains online"
+                )
 
     async def close(self) -> None:
         if self._opened:
+            await self._log_writer.close()
             await self._pool.close()
             self._opened = False
 
@@ -236,6 +255,54 @@ class PostgresEconomyStore:
                 """CREATE INDEX IF NOT EXISTS economy_leaderboard_idx
                    ON economy_accounts (guild_id, balance DESC, user_id ASC)"""
             )
+            await connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS economy_log (
+                    id BIGSERIAL PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    counterparty_id BIGINT,
+                    amount BIGINT NOT NULL,
+                    balance_after BIGINT NOT NULL,
+                    counterparty_balance_after BIGINT,
+                    occurred_at BIGINT NOT NULL,
+                    details JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            await connection.execute(
+                """CREATE INDEX IF NOT EXISTS economy_log_guild_time_idx
+                   ON economy_log (guild_id, occurred_at DESC)"""
+            )
+
+    def _log(
+        self,
+        event_type: str,
+        guild_id: int,
+        user_id: int,
+        amount: int,
+        balance_after: int,
+        occurred_at: int,
+        *,
+        counterparty_id: Optional[int] = None,
+        counterparty_balance_after: Optional[int] = None,
+        details: Optional[dict[str, Any]] = None,
+    ) -> None:
+        self._log_writer.enqueue(
+            EconomyLogRecord(
+                event_type=event_type,
+                guild_id=guild_id,
+                user_id=user_id,
+                counterparty_id=counterparty_id,
+                amount=amount,
+                balance_after=balance_after,
+                counterparty_balance_after=counterparty_balance_after,
+                occurred_at=occurred_at,
+                details=details,
+            )
+        )
 
     async def _connection(self) -> Any:
         await self.open()
@@ -440,19 +507,31 @@ class PostgresEconomyStore:
                     timestamp, guild_id, user_id, WORK_COOLDOWN_SECONDS, timestamp,
                 ),
             )
-            if row is None:  # Rare first-use race: retry after the competing insert commits.
-                return await self.work(guild_id, user_id, reward, now=timestamp)
-            worked = bool(row["worked"])
-            gross_earned = int(row["gross_earned"])
-            garnished = int(row["garnished"])
-            return WorkResult(
-                gross_earned - garnished if worked else 0,
-                int(row["balance"]),
-                int(row["retry_after"]),
-                gross_earned,
-                garnished,
-                int(row["loan_remaining"]),
+            result = None
+            if row is not None:
+                worked = bool(row["worked"])
+                gross_earned = int(row["gross_earned"])
+                garnished = int(row["garnished"])
+                result = WorkResult(
+                    gross_earned - garnished if worked else 0,
+                    int(row["balance"]),
+                    int(row["retry_after"]),
+                    gross_earned,
+                    garnished,
+                    int(row["loan_remaining"]),
+                )
+        if result is None:  # Rare first-use race: retry after the competing insert commits.
+            return await self.work(guild_id, user_id, reward, now=timestamp)
+        if result.gross_earned:
+            self._log(
+                "work", guild_id, user_id, result.earned, result.balance, timestamp,
+                details={
+                    "gross_earned": result.gross_earned,
+                    "garnished": result.garnished,
+                    "loan_remaining": result.loan_remaining,
+                },
             )
+        return result
 
     async def gamble(
         self,
@@ -527,12 +606,22 @@ class PostgresEconomyStore:
                     timestamp, guild_id, user_id,
                 ),
             )
-            if row is None:
-                return await self.settle_wager(
-                    guild_id, user_id, amount, profit=profit, now=timestamp
+            result = None
+            if row is not None:
+                accepted = bool(row["accepted"])
+                result = WagerResult(
+                    accepted, amount, profit if accepted else 0, int(row["balance"])
                 )
-            accepted = bool(row["accepted"])
-            return WagerResult(accepted, amount, profit if accepted else 0, int(row["balance"]))
+        if result is None:
+            return await self.settle_wager(
+                guild_id, user_id, amount, profit=profit, now=timestamp
+            )
+        if result.accepted:
+            self._log(
+                "wager", guild_id, user_id, result.profit, result.balance, timestamp,
+                details={"wager": result.amount},
+            )
+        return result
 
     async def pay_reserved_wager(
         self,
@@ -557,7 +646,9 @@ class PostgresEconomyStore:
             )
             if row is None:
                 raise RuntimeError("Reserved wager account no longer exists")
-            return int(row["balance"])
+            balance = int(row["balance"])
+        self._log("wager_payout", guild_id, user_id, payout, balance, timestamp)
+        return balance
 
     async def credit_activity_reward(
         self,
@@ -583,11 +674,14 @@ class PostgresEconomyStore:
                    RETURNING balance""",
                 (guild_id, user_id, STARTING_BALANCE, amount, timestamp, STARTING_BALANCE),
             )
-            return int(row["balance"])
+            balance = int(row["balance"])
+        self._log("activity_reward", guild_id, user_id, amount, balance, timestamp)
+        return balance
 
     async def credit_message_reward(self, guild_id: int, user_id: int, amount: int) -> int:
         """Silently credit a buffered message reward without affecting rob activity."""
         amount = max(0, int(amount))
+        timestamp = self._now(None)
         connection_context = await self._connection()
         async with connection_context as connection:
             row = await self._fetchone(
@@ -599,7 +693,9 @@ class PostgresEconomyStore:
                    RETURNING balance""",
                 (guild_id, user_id, STARTING_BALANCE, amount, STARTING_BALANCE),
             )
-            return int(row["balance"])
+            balance = int(row["balance"])
+        self._log("message_reward", guild_id, user_id, amount, balance, timestamp)
+        return balance
 
     async def start_activity(
         self,
@@ -708,7 +804,12 @@ class PostgresEconomyStore:
                    RETURNING balance""",
                 (amount, amount, due, timestamp, guild_id, user_id),
             )
-            return LoanResult("borrowed", int(updated["balance"]), amount, due, amount)
+            result = LoanResult("borrowed", int(updated["balance"]), amount, due, amount)
+        self._log(
+            "loan_borrowed", guild_id, user_id, amount, result.balance, timestamp,
+            details={"loan_balance": result.loan_balance, "loan_due": due},
+        )
+        return result
 
     async def repay_loan(
         self,
@@ -748,7 +849,12 @@ class PostgresEconomyStore:
                    WHERE guild_id = %s AND user_id = %s""",
                 (balance, loan_balance, updated_due, timestamp, guild_id, user_id),
             )
-            return LoanResult("repaid", balance, loan_balance, updated_due, payment)
+            result = LoanResult("repaid", balance, loan_balance, updated_due, payment)
+        self._log(
+            "loan_repaid", guild_id, user_id, -payment, result.balance, timestamp,
+            details={"payment": payment, "loan_balance": result.loan_balance},
+        )
+        return result
 
     async def upgrade_security(
         self,
@@ -800,16 +906,24 @@ class PostgresEconomyStore:
                     timestamp, guild_id, user_id, MAX_SECURITY_LEVEL, MAX_SECURITY_LEVEL,
                 ),
             )
-            if row is None:
-                return await self.upgrade_security(guild_id, user_id, now=timestamp)
-            level = int(row["security_level"])
-            return SecurityUpgradeResult(
-                str(row["status"]),  # type: ignore[arg-type]
-                level,
-                int(row["cost"]),
-                int(row["balance"]),
-                security_protection_percent(level),
+            result = None
+            if row is not None:
+                level = int(row["security_level"])
+                result = SecurityUpgradeResult(
+                    str(row["status"]),  # type: ignore[arg-type]
+                    level,
+                    int(row["cost"]),
+                    int(row["balance"]),
+                    security_protection_percent(level),
+                )
+        if result is None:
+            return await self.upgrade_security(guild_id, user_id, now=timestamp)
+        if result.status == "upgraded":
+            self._log(
+                "security_upgrade", guild_id, user_id, -result.cost,
+                result.balance, timestamp, details={"level": result.level},
             )
+        return result
 
     async def gift(
         self,
@@ -856,7 +970,13 @@ class PostgresEconomyStore:
                     giver_id, timestamp, guild_id, giver_id, recipient_id,
                 ),
             )
-            return GiftResult(True, amount, giver_balance, recipient_balance)
+            result = GiftResult(True, amount, giver_balance, recipient_balance)
+        self._log(
+            "gift", guild_id, giver_id, -amount, result.giver_balance, timestamp,
+            counterparty_id=recipient_id,
+            counterparty_balance_after=result.recipient_balance,
+        )
+        return result
 
     async def rob(
         self,
@@ -933,7 +1053,15 @@ class PostgresEconomyStore:
                     guild_id, robber_id, target_id,
                 ),
             )
-            return RobResult(status, amount, robber_balance, target_balance)
+            result = RobResult(status, amount, robber_balance, target_balance)
+        robber_delta = amount if result.status == "success" else -amount
+        self._log(
+            "rob", guild_id, robber_id, robber_delta, result.robber_balance, timestamp,
+            counterparty_id=target_id,
+            counterparty_balance_after=result.target_balance,
+            details={"status": result.status},
+        )
+        return result
 
     @staticmethod
     async def _touch(connection: Any, guild_id: int, user_id: int, timestamp: int) -> None:

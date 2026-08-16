@@ -90,6 +90,8 @@ economy_store = PostgresEconomyStore(
     or DEFAULT_POSTGRES_URL,
     min_pool_size=int(os.getenv("ECONOMY_DB_POOL_MIN", "5")),
     max_pool_size=int(os.getenv("ECONOMY_DB_POOL_MAX", "10")),
+    log_queue_size=int(os.getenv("ECONOMY_LOG_QUEUE_SIZE", "10000")),
+    log_batch_size=int(os.getenv("ECONOMY_LOG_BATCH_SIZE", "100")),
 )
 music_runtime = MusicRuntime(
     logger=logger,
