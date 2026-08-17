@@ -825,40 +825,6 @@ def setup(handler: CommandHandler) -> None:
                 f"Balance: **{_format_coins(result.robber_balance)}**."
             )
 
-    @slash_command(name="security", description="Buy the next anti-rob security tier")
-    async def security_command(ctx: SlashContext):
-        await defer_ping(ctx)
-        guild_id = await _require_guild(ctx)
-        if guild_id is None:
-            return
-        result = await store.upgrade_security(guild_id, int(ctx.author.id))
-        if result.status == "maxed":
-            await send_ping(ctx,
-                f"🛡️ Your security is already maxed at **tier {MAX_SECURITY_LEVEL}** "
-                f"(**{result.protection_percent:.2f}%** protection). Balance: "
-                f"**{_format_coins(result.balance)}**.",
-                ephemeral=True,
-            )
-            return
-        if result.status == "insufficient":
-            await send_ping(ctx,
-                f"🛡️ Security tier **{result.level + 1}** costs "
-                f"**{_format_coins(result.cost)}**. You are tier **{result.level}/{MAX_SECURITY_LEVEL}** "
-                f"with **{result.protection_percent:.2f}%** protection. Balance: "
-                f"**{_format_coins(result.balance)}**.",
-                ephemeral=True,
-            )
-            return
-
-        success_percent = rob_success_chance(result.level) * 100
-        await send_ping(ctx,
-            f"🛡️ Security upgraded to **tier {result.level}/{MAX_SECURITY_LEVEL}**. "
-            f"Protection: **{result.protection_percent:.2f}%**; robbers now have a "
-            f"**{success_percent:.2f}%** chance to succeed (base "
-            f"{BASE_ROB_SUCCESS_PERCENT:.0f}%). Cost: **{_format_coins(result.cost)}**. "
-            f"Balance: **{_format_coins(result.balance)}**."
-        )
-
     async def _send_upgrade_device_autocomplete(ctx: AutocompleteContext) -> None:
         search = (ctx.input_text or "").strip().casefold()
         for value, name in (
@@ -1021,7 +987,6 @@ def setup(handler: CommandHandler) -> None:
 
     handler.register_slash_command(blackjack_command)
     handler.register_slash_command(rob_command)
-    handler.register_slash_command(security_command)
     handler.register_slash_command(upgrade_command)
     handler.register_slash_command(gift_command)
     handler.register_listener(open_economy_pool)

@@ -53,6 +53,8 @@ class EconomySecurityTests(unittest.TestCase):
             "upgrade_dumpster_speed",
             "gift",
             "rob",
+            "load_stock_market",
+            "save_stock_market",
         ):
             self.assertTrue(
                 inspect.iscoroutinefunction(getattr(PostgresEconomyStore, method_name))
@@ -149,6 +151,58 @@ class EconomyMarketTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("DELETE FROM economy_inventory" in sql for sql in statements))
         self.assertIn("INSERT INTO economy_inventory", store._fetchone.await_args.args[1])
         store._log.assert_called_once()
+
+    async def test_load_stock_market_fetches_three_tables(self) -> None:
+        store = PostgresEconomyStore.__new__(PostgresEconomyStore)
+        connection = Mock()
+        store._connection = AsyncMock(return_value=_ConnectionContext(connection))
+        store._fetchall = AsyncMock(
+            side_effect=[
+                [{"symbol": "RKLB", "price": 4.2}],
+                [{"user_id": 2, "cash": 900.0}],
+                [{"user_id": 2, "symbol": "RKLB", "long_qty": 25}],
+            ]
+        )
+
+        market, accounts, positions = await store.load_stock_market(1)
+
+        self.assertEqual(market[0]["symbol"], "RKLB")
+        self.assertEqual(accounts[0]["cash"], 900.0)
+        self.assertEqual(positions[0]["long_qty"], 25)
+        self.assertEqual(store._fetchall.await_count, 3)
+
+    async def test_save_stock_market_upserts_every_table(self) -> None:
+        store = PostgresEconomyStore.__new__(PostgresEconomyStore)
+        connection = Mock()
+        connection.execute = AsyncMock()
+        store._connection = AsyncMock(return_value=_ConnectionContext(connection))
+
+        market_rows = [{
+            "symbol": "GD", "name": "General Dynamics", "sector": "Defense",
+            "shares_outstanding": 5500, "base_price": 5.5, "price": 5.6,
+            "prev_close": 5.5, "open_price": 5.5, "session_high": 5.6,
+            "session_low": 5.5, "volume": 100, "traded_value": 550.0,
+        }]
+        account_rows = [{
+            "user_id": 2, "cash": 800.0, "realized_pnl": 0.0, "trades": 1,
+            "buys": 1, "sells": 0, "short_opens": 0, "covers": 0,
+            "volume_bought": 100, "volume_sold": 0,
+        }]
+        position_rows = [{
+            "user_id": 2, "symbol": "GD", "long_qty": 100, "long_avg_cost": 5.5,
+            "short_qty": 0, "short_avg_entry": 0.0,
+        }]
+
+        await store.save_stock_market(
+            1, market_rows, account_rows, position_rows, now=1_000
+        )
+
+        statements = [call.args[0] for call in connection.execute.await_args_list]
+        self.assertIn("INSERT INTO economy_stock_market", statements[0])
+        self.assertIn("INSERT INTO economy_stock_accounts", statements[1])
+        self.assertIn("INSERT INTO economy_stock_positions", statements[2])
+        self.assertTrue(all("ON CONFLICT" in sql for sql in statements))
+        self.assertEqual(connection.execute.await_count, 3)
 
     async def test_crafting_reports_every_missing_ingredient_without_mutation(self) -> None:
         store = PostgresEconomyStore.__new__(PostgresEconomyStore)
