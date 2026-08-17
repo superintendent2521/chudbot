@@ -26,11 +26,6 @@ class StockMarketSmokeTests(unittest.TestCase):
         self.assertEqual(market.stocks["RKLB"].name, "Rocket Lab")
         self.assertTrue(all(s.shares_outstanding > 0 for s in market.stocks.values()))
 
-    def test_initially_full_float_is_available(self) -> None:
-        market = _market()
-        for symbol, stock in market.stocks.items():
-            self.assertEqual(market.float_available(symbol), stock.shares_outstanding)
-
     def test_index_starts_at_base(self) -> None:
         self.assertEqual(_market().index(), INDEX_BASE)
 
@@ -52,17 +47,15 @@ class BuySellTests(unittest.TestCase):
         self.assertAlmostEqual(account.cash, STARTING_BALANCE - 100 * price)
         self.assertAlmostEqual(account.longs["RKLB"].avg_cost, price)
 
-    def test_buy_raises_price_and_reduces_float(self) -> None:
+    def test_buy_raises_price(self) -> None:
         market = _market()
         before = market.stocks["RKLB"].price
-        available_before = market.float_available("RKLB")
         market.buy(1, "RKLB", 200)  # ~$840, within the $1,000 starting cash
         self.assertGreater(market.stocks["RKLB"].price, before)
-        self.assertEqual(market.float_available("RKLB"), available_before - 200)
 
     def test_buy_rejected_when_cash_is_insufficient(self) -> None:
         market = _market()
-        # 1,000 LMT shares fit in the float but cost $8,750 > $1,000 cash.
+        # The order is affordable only in quantity, not in cash.
         result = market.buy(1, "LMT", 1_000)
         self.assertFalse(result.accepted)
         self.assertIn("insufficient funds", result.reason)
@@ -110,13 +103,11 @@ class ShortCoverTests(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertIn("margin", result.reason)
 
-    def test_short_rejected_when_float_is_exhausted(self) -> None:
+    def test_short_can_exceed_legacy_float_size(self) -> None:
         market = _market()
         market.stocks["SPCX"].shares_outstanding = 5
-        market.buy(1, "SPCX", 5)  # take the entire (tiny) float
-        result = market.short(2, "SPCX", 1)
-        self.assertFalse(result.accepted)
-        self.assertIn("shares can be borrowed", result.reason)
+        result = market.short(1, "SPCX", 100)
+        self.assertTrue(result.accepted)
 
     def test_cover_returns_shares_and_closes_position(self) -> None:
         market = _market()
@@ -151,18 +142,16 @@ class EdgeCaseTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             _market().buy(1, "NOPE", 1)
 
-    def test_buy_rejected_beyond_float(self) -> None:
+    def test_buy_can_exceed_legacy_float_size(self) -> None:
         market = _market()
-        available = market.float_available("SPCX")
-        result = market.buy(1, "SPCX", available + 1)
-        self.assertFalse(result.accepted)
-        self.assertGreaterEqual(market.float_available("SPCX"), 0)
+        market._account(1).cash = 1_000_000
+        result = market.buy(1, "SPCX", market.stocks["SPCX"].shares_outstanding + 1)
+        self.assertTrue(result.accepted)
 
     def test_price_never_drops_below_minimum(self) -> None:
         market = _market()
         for _ in range(500):
-            if market.float_available("RKLB") > 0:
-                market.short(2, "RKLB", 1)
+            market.short(2, "RKLB", 1)
         self.assertGreaterEqual(market.stocks["RKLB"].price, MIN_PRICE)
 
     def test_nonpositive_quantity_is_rejected(self) -> None:
@@ -212,11 +201,11 @@ class FakeStore:
 
 
 class PersistenceTests(unittest.IsolatedAsyncioTestCase):
-    def test_small_float_moves_for_a_single_player(self) -> None:
+    def test_order_size_moves_price_for_a_single_player(self) -> None:
         # ~30-player sizing: one meaningful order visibly moves the ticker.
         market = _market()
         before = market.stocks["GD"].price
-        market.buy(1, "GD", 150)  # ~$825, within starting cash; ~2.7% of float
+        market.buy(1, "GD", 150)  # ~$825, within starting cash
         self.assertGreater(market.stocks["GD"].price, before * 1.01)
 
     def test_serialize_then_hydrate_round_trips_state(self) -> None:

@@ -1,10 +1,7 @@
 """Player-driven, in-memory stock market with 4 listed companies.
 
 The market is deliberately **player controlled**: there is no background
-wall-clock ticker. Every price move is driven by a player trade acting against
-a finite float (shares outstanding). Buying shares (or covering a short) draws
-demand out of the float and pushes the price up; selling shares (or opening a
-short) returns shares to the float and pushes the price down. An optional
+wall-clock ticker. Every price move is driven by a player trade. An optional
 ``tick`` adds a tiny random-walk so prices keep breathing between trades.
 
 Supported actions:
@@ -30,13 +27,14 @@ from typing import Any, Mapping, Optional, Sequence
 
 
 ## MARKET PARAMETERS
-# The server only has ~30 active players, so floats are small and prices are
-# coin-scale so a single player's order visibly moves the price. Player funds
+# The server only has ~30 active players, so prices are coin-scale and a single
+# player's order visibly moves the price. ``shares_outstanding`` is retained
+# as a price-impact scale, not a cap on how many shares can be traded. Player funds
 # come from the real coin wallet (``economy_accounts.balance``); this constant
 # is only the fallback for standalone/in-memory use and matches the coin start.
 STARTING_BALANCE = 1_000.0
 MIN_PRICE = 0.05
-PRICE_ELASTICITY = 60.0       # % move when one full float turns over in one trade
+PRICE_ELASTICITY = 60.0       # % move when one price-impact scale turns over
 MAX_TRADE_PRICE_MOVE = 0.25   # largest accepted single-trade price move
 SHORT_MARGIN_RATE = 0.5       # fraction of notional required in cash before shorting
 INDEX_BASE = 1_000.0          # arithmetic market-index base
@@ -140,7 +138,7 @@ class TradeResult:
     equity: float
     reason: str = ""
 def _initial_stocks() -> list[Stock]:
-    # Small floats and coin-scale prices so a ~30-player guild can trade
+    # Coin-scale prices so a ~30-player guild can trade
     # meaningful stakes and individual orders actually move each ticker.
     return [
         Stock("RKLB", "Rocket Lab", "Space",     6_000, 4.20),
@@ -180,34 +178,11 @@ class StockMarket:
             raise KeyError(f"unknown ticker {symbol!r}")
         return stock, self._account(player_id)
 
-    def _held(self, symbol: str) -> int:
-        return sum(
-            account.longs[symbol].shares
-            for account in self._players.values()
-            if symbol in account.longs
-        )
-
-    def _shorted(self, symbol: str) -> int:
-        return sum(
-            account.shorts[symbol].quantity
-            for account in self._players.values()
-            if symbol in account.shorts
-        )
-
-    def float_available(self, symbol: str) -> int:
-        """Shares left in the public float for the given ticker."""
-        stock = self.stocks[symbol.upper()]
-        return stock.shares_outstanding - self._held(
-            stock.symbol
-        ) - self._shorted(stock.symbol)
-
     # ------------------------------------------------------------ price engine
     def _move_price(self, stock: Stock, signed_shares: int) -> None:
         """Apply order-flow price impact for a signed number of shares.
 
-        ``signed_shares > 0`` draws demand out of the float (buy/cover) and
-        raises the price; ``< 0`` returns shares to the float (sell/short open)
-        and lowers it.
+        Positive flow raises the price; negative flow lowers it.
         """
         if signed_shares == 0:
             return
@@ -246,12 +221,6 @@ class StockMarket:
         if q <= 0:
             return self._reject("buy", symbol, player_id, "quantity must be positive")
         stock, account = self._resolve(symbol, player_id)
-        available = self.float_available(stock.symbol)
-        if q > available:
-            return self._reject(
-                "buy", stock.symbol, player_id,
-                f"only {available:,} shares are available in the float",
-            )
         cost = q * stock.price
         if cost > account.cash:
             return self._reject(
@@ -300,7 +269,7 @@ class StockMarket:
         return self._accept("sell", stock.symbol, player_id, q, stock.price, proceeds)
 
     def short(self, player_id: PlayerId, symbol: str, quantity: int) -> TradeResult:
-        """Borrow shares from the float, sell them, and keep the proceeds.
+        """Create a short position and keep the sale proceeds.
 
         Requires ``SHORT_MARGIN_RATE`` of the notional value available in cash
         as a light safeguard against a runaway margin call.
@@ -311,12 +280,6 @@ class StockMarket:
                 "short", symbol, player_id, "quantity must be positive"
             )
         stock, account = self._resolve(symbol, player_id)
-        available = self.float_available(stock.symbol)
-        if q > available:
-            return self._reject(
-                "short", stock.symbol, player_id,
-                f"only {available:,} shares can be borrowed",
-            )
         notional = q * stock.price
         margin = SHORT_MARGIN_RATE * notional
         if account.cash < margin:
@@ -473,8 +436,6 @@ class StockMarket:
             f"Low {self._money(stock.session_low)}",
             f"Volume: {stock.volume:,}    "
             f"Traded: {self._money(stock.traded_value)}",
-            f"Float available: {self.float_available(stock.symbol):,} / "
-            f"{stock.shares_outstanding:,}",
         ]
         if player_id is not None:
             lines.append(self._position_line(player_id, stock.symbol))
