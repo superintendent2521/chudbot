@@ -187,6 +187,10 @@ class FakeStore:
         self.saved: tuple = ([], [], [])
         self.saved_guild: int = 0
         self.save_count: int = 0
+        self.stock_logs: list[dict] = []
+
+    def log_stock_trade(self, guild_id: int, user_id: int, **details) -> None:
+        self.stock_logs.append({"guild_id": guild_id, "user_id": user_id, **details})
 
     async def load_stock_market(self, guild_id: int):
         if not self.saved or self.saved_guild != guild_id:
@@ -244,6 +248,10 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(result.accepted)
         self.assertEqual(store.save_count, 1)
+        self.assertEqual(store.stock_logs[0]["action"], "buy")
+        self.assertEqual(store.stock_logs[0]["symbol"], "SPCX")
+        self.assertEqual(store.stock_logs[0]["quantity"], 100)
+        self.assertEqual(store.stock_logs[0]["amount"], -700)
 
         # A fresh market hydrated from the persisted rows sees the same stake.
         reloaded = await load_stock_market(store, 11)
@@ -257,6 +265,7 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(result.accepted)
         self.assertEqual(store.save_count, 0)
+        self.assertEqual(store.stock_logs, [])
 
     def test_run_stock_trade_dispatches_and_rejects_unknown_action(self) -> None:
         market = _market()

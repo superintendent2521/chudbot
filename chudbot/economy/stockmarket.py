@@ -806,4 +806,17 @@ async def execute_stock_trade(
             cash=account.cash,
             equity=market.equity(player_id),
         )
+        log_stock_trade = getattr(store, "log_stock_trade", None)
+        if log_stock_trade is not None:
+            log_stock_trade(
+                guild_id,
+                player_id,
+                action=result.action,
+                symbol=result.symbol,
+                quantity=result.quantity,
+                price=result.price,
+                amount=delta,
+                balance_after=int(result.cash),
+                occurred_at=now,
+            )
     return result, market

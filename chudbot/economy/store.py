@@ -621,6 +621,35 @@ class PostgresEconomyStore:
             )
         )
 
+    def log_stock_trade(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        action: str,
+        symbol: str,
+        quantity: int,
+        price: float,
+        amount: int,
+        balance_after: int,
+        occurred_at: Optional[int] = None,
+    ) -> None:
+        """Queue an accepted stock trade in the economy audit log."""
+        self._log(
+            "stock_trade",
+            guild_id,
+            user_id,
+            amount,
+            balance_after,
+            self._now(occurred_at),
+            details={
+                "action": action,
+                "symbol": symbol,
+                "quantity": quantity,
+                "price": price,
+            },
+        )
+
     async def _connection(self) -> Any:
         await self.open()
         return self._timed_connection()
