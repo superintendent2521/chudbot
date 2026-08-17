@@ -32,11 +32,6 @@ def new_game(rng: Any) -> tuple[list[str], list[str], list[str]]:
     rng.shuffle(deck)
     player_hand = [deck.pop(), deck.pop()]
     dealer_hand = [deck.pop(), deck.pop()]
-    # The dealer must not open with a natural blackjack. Return the second
-    # card and draw again so the deck still contains exactly 52 unique cards.
-    while hand_value(dealer_hand) == 21:
-        deck.insert(0, dealer_hand.pop())
-        dealer_hand.append(deck.pop())
     return deck, player_hand, dealer_hand
 
 

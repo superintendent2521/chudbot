@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Literal, Mapping, Optional, Sequence
+from typing import Any, Literal, Mapping, Optional
 
 from chudbot.economy.logging import EconomyLogRecord, EconomyLogWriter
 
@@ -531,68 +531,6 @@ class PostgresEconomyStore:
                 """CREATE INDEX IF NOT EXISTS economy_market_sales_history_idx
                    ON economy_market_sales (guild_id, item_key, sold_at DESC)"""
             )
-            await connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS economy_stock_market (
-                    guild_id BIGINT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    sector TEXT NOT NULL,
-                    shares_outstanding BIGINT NOT NULL,
-                    base_price DOUBLE PRECISION NOT NULL,
-                    price DOUBLE PRECISION NOT NULL,
-                    prev_close DOUBLE PRECISION NOT NULL,
-                    open_price DOUBLE PRECISION NOT NULL,
-                    session_high DOUBLE PRECISION NOT NULL,
-                    session_low DOUBLE PRECISION NOT NULL,
-                    volume BIGINT NOT NULL DEFAULT 0,
-                    traded_value DOUBLE PRECISION NOT NULL DEFAULT 0,
-                    updated_at BIGINT NOT NULL,
-                    PRIMARY KEY (guild_id, symbol)
-                )
-                """
-            )
-            await connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS economy_stock_accounts (
-                    guild_id BIGINT NOT NULL,
-                    user_id BIGINT NOT NULL,
-                    realized_pnl DOUBLE PRECISION NOT NULL DEFAULT 0,
-                    trades BIGINT NOT NULL DEFAULT 0,
-                    buys BIGINT NOT NULL DEFAULT 0,
-                    sells BIGINT NOT NULL DEFAULT 0,
-                    short_opens BIGINT NOT NULL DEFAULT 0,
-                    covers BIGINT NOT NULL DEFAULT 0,
-                    volume_bought BIGINT NOT NULL DEFAULT 0,
-                    volume_sold BIGINT NOT NULL DEFAULT 0,
-                    updated_at BIGINT NOT NULL,
-                    PRIMARY KEY (guild_id, user_id)
-                )
-                """
-            )
-            await connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS economy_stock_positions (
-                    guild_id BIGINT NOT NULL,
-                    user_id BIGINT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    long_qty BIGINT NOT NULL DEFAULT 0,
-                    long_avg_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
-                    short_qty BIGINT NOT NULL DEFAULT 0,
-                    short_avg_entry DOUBLE PRECISION NOT NULL DEFAULT 0,
-                    updated_at BIGINT NOT NULL,
-                    PRIMARY KEY (guild_id, user_id, symbol)
-                )
-                """
-            )
-            # The market ledger now lives on the real coin wallet
-            # (economy_accounts.balance); the old stock cash pot is gone.
-            await connection.execute(
-                "ALTER TABLE economy_stock_accounts DROP COLUMN IF EXISTS cash"
-            )
-            await connection.execute(
-                "ALTER TABLE economy_stock_accounts DROP COLUMN IF EXISTS created_at"
-            )
 
     def _log(
         self,
@@ -619,35 +557,6 @@ class PostgresEconomyStore:
                 occurred_at=occurred_at,
                 details=details,
             )
-        )
-
-    def log_stock_trade(
-        self,
-        guild_id: int,
-        user_id: int,
-        *,
-        action: str,
-        symbol: str,
-        quantity: int,
-        price: float,
-        amount: int,
-        balance_after: int,
-        occurred_at: Optional[int] = None,
-    ) -> None:
-        """Queue an accepted stock trade in the economy audit log."""
-        self._log(
-            "stock_trade",
-            guild_id,
-            user_id,
-            amount,
-            balance_after,
-            self._now(occurred_at),
-            details={
-                "action": action,
-                "symbol": symbol,
-                "quantity": quantity,
-                "price": price,
-            },
         )
 
     async def _connection(self) -> Any:
@@ -1666,146 +1575,6 @@ class PostgresEconomyStore:
             details={"item_key": item_key, "quantity": quantity, "unit_price": unit_price},
         )
         return result
-
-    async def load_stock_market(
-        self, guild_id: int
-    ) -> tuple[list[Any], list[Any], list[Any]]:
-        """Return persisted stock-market rows: (market, accounts, positions).
-
-        The three lists are row dicts (psycopg ``dict_row``) describing the
-        shared ticker snapshot and every player's cash, statistics, and stakes.
-        """
-        connection_context = await self._connection()
-        async with connection_context as connection:
-            market = await self._fetchall(
-                connection,
-                """SELECT symbol, name, sector, shares_outstanding, base_price,
-                          price, prev_close, open_price, session_high, session_low,
-                          volume, traded_value
-                   FROM economy_stock_market WHERE guild_id = %s ORDER BY symbol""",
-                (guild_id,),
-            )
-            accounts = await self._fetchall(
-                connection,
-                """SELECT stock.user_id, accounts.balance, stock.realized_pnl,
-                          stock.trades, stock.buys, stock.sells, stock.short_opens,
-                          stock.covers, stock.volume_bought, stock.volume_sold
-                   FROM economy_stock_accounts AS stock
-                   JOIN economy_accounts AS accounts
-                     ON accounts.guild_id = stock.guild_id
-                    AND accounts.user_id = stock.user_id
-                  WHERE stock.guild_id = %s ORDER BY stock.user_id""",
-                (guild_id,),
-            )
-            positions = await self._fetchall(
-                connection,
-                """SELECT user_id, symbol, long_qty, long_avg_cost,
-                          short_qty, short_avg_entry
-                   FROM economy_stock_positions
-                   WHERE guild_id = %s ORDER BY user_id, symbol""",
-                (guild_id,),
-            )
-        return list(market), list(accounts), list(positions)
-
-    async def save_stock_market(
-        self,
-        guild_id: int,
-        market_rows: Sequence[Mapping[str, Any]],
-        account_rows: Sequence[Mapping[str, Any]],
-        position_rows: Sequence[Mapping[str, Any]],
-        *,
-        now: Optional[int] = None,
-    ) -> None:
-        """Persist the full stock-market snapshot across three tables.
-
-        ``market_rows`` come from ``StockMarket.serialize_market()``,
-        ``account_rows`` from ``serialize_accounts()`` and ``position_rows``
-        from ``serialize_positions()``. Each row is upserted.
-        """
-        timestamp = self._now(now)
-        connection_context = await self._connection()
-        async with connection_context as connection:
-            for row in market_rows:
-                await connection.execute(
-                    """INSERT INTO economy_stock_market
-                       (guild_id, symbol, name, sector, shares_outstanding,
-                        base_price, price, prev_close, open_price, session_high,
-                        session_low, volume, traded_value, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                       ON CONFLICT (guild_id, symbol) DO UPDATE SET
-                         name = EXCLUDED.name, sector = EXCLUDED.sector,
-                         shares_outstanding = EXCLUDED.shares_outstanding,
-                         base_price = EXCLUDED.base_price, price = EXCLUDED.price,
-                         prev_close = EXCLUDED.prev_close,
-                         open_price = EXCLUDED.open_price,
-                         session_high = EXCLUDED.session_high,
-                         session_low = EXCLUDED.session_low,
-                         volume = EXCLUDED.volume,
-                         traded_value = EXCLUDED.traded_value,
-                         updated_at = EXCLUDED.updated_at""",
-                    (guild_id, row["symbol"], row["name"], row["sector"],
-                     row["shares_outstanding"], row["base_price"], row["price"],
-                     row["prev_close"], row["open_price"], row["session_high"],
-                     row["session_low"], row["volume"], row["traded_value"],
-                     timestamp),
-                )
-            wallet_rows = [row for row in account_rows if "coin_delta" in row]
-            user_ids = {int(row["user_id"]) for row in wallet_rows}
-            if user_ids:
-                await self._ensure_accounts(connection, guild_id, *user_ids)
-            for row in account_rows:
-                # ``coin_delta`` is present for engine snapshots. Keeping this
-                # conditional preserves compatibility with callers that only
-                # persist the stock ledger (and with pre-wallet snapshots).
-                if row.get("coin_delta"):
-                    await connection.execute(
-                        """UPDATE economy_accounts
-                           SET balance = balance + %s, last_activity = %s
-                           WHERE guild_id = %s AND user_id = %s""",
-                        (row["coin_delta"], timestamp, guild_id, row["user_id"]),
-                    )
-                await connection.execute(
-                    """INSERT INTO economy_stock_accounts
-                       (guild_id, user_id, realized_pnl, trades, buys, sells,
-                        short_opens, covers, volume_bought, volume_sold, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                       ON CONFLICT (guild_id, user_id) DO UPDATE SET
-                         realized_pnl = EXCLUDED.realized_pnl,
-                         trades = EXCLUDED.trades, buys = EXCLUDED.buys,
-                         sells = EXCLUDED.sells,
-                         short_opens = EXCLUDED.short_opens,
-                         covers = EXCLUDED.covers,
-                         volume_bought = EXCLUDED.volume_bought,
-                         volume_sold = EXCLUDED.volume_sold,
-                         updated_at = EXCLUDED.updated_at""",
-                    (guild_id, row["user_id"], row["realized_pnl"],
-                     row["trades"], row["buys"], row["sells"], row["short_opens"],
-                     row["covers"], row["volume_bought"], row["volume_sold"],
-                     timestamp),
-                )
-            # Position rows are a complete snapshot. Remove rows that are no
-            # longer present (for example, after selling the last share) so a
-            # later reload cannot resurrect a closed position.
-            await connection.execute(
-                "DELETE FROM economy_stock_positions WHERE guild_id = %s",
-                (guild_id,),
-            )
-            for row in position_rows:
-                await connection.execute(
-                    """INSERT INTO economy_stock_positions
-                       (guild_id, user_id, symbol, long_qty, long_avg_cost,
-                        short_qty, short_avg_entry, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                       ON CONFLICT (guild_id, user_id, symbol) DO UPDATE SET
-                         long_qty = EXCLUDED.long_qty,
-                         long_avg_cost = EXCLUDED.long_avg_cost,
-                         short_qty = EXCLUDED.short_qty,
-                         short_avg_entry = EXCLUDED.short_avg_entry,
-                         updated_at = EXCLUDED.updated_at""",
-                    (guild_id, row["user_id"], row["symbol"], row["long_qty"],
-                     row["long_avg_cost"], row["short_qty"], row["short_avg_entry"],
-                     timestamp),
-                )
 
     async def create_buy_order(
         self,

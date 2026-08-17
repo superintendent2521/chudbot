@@ -385,8 +385,6 @@ def setup(handler: CommandHandler) -> None:
                 ephemeral=True,
             )
             return
-        assert loot.fixed_value is not None
-        sale_value = loot.fixed_value
         await defer_ping(ctx, ephemeral=loot.rarity >= 4 and quantity > 0)
         confirmation = None
         confirmation_buttons = []
@@ -406,7 +404,7 @@ def setup(handler: CommandHandler) -> None:
             confirmation_message = await send_ping(ctx,
                 f"⚠️ **{_rarity_name(loot.rarity)} item confirmation**\n"
                 f"Sell **{quantity:,}× {loot.name}** for "
-                f"**{_format_coins(quantity * sale_value)}**?",
+                f"**{_format_coins(quantity * loot.coin_value)}**?",
                 components=confirmation_buttons,
                 ephemeral=True,
             )
@@ -438,7 +436,7 @@ def setup(handler: CommandHandler) -> None:
                 return
             await defer_ping(confirmation.ctx, edit_origin=True)
         result = await store.sell_inventory_item(
-            guild_id, int(ctx.author.id), loot.key, quantity, sale_value
+            guild_id, int(ctx.author.id), loot.key, quantity, loot.coin_value
         )
         if result.status == "invalid":
             response = "Choose a positive quantity."
