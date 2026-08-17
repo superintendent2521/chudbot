@@ -200,9 +200,10 @@ class EconomyMarketTests(unittest.IsolatedAsyncioTestCase):
         statements = [call.args[0] for call in connection.execute.await_args_list]
         self.assertIn("INSERT INTO economy_stock_market", statements[0])
         self.assertIn("INSERT INTO economy_stock_accounts", statements[1])
-        self.assertIn("INSERT INTO economy_stock_positions", statements[2])
-        self.assertTrue(all("ON CONFLICT" in sql for sql in statements))
-        self.assertEqual(connection.execute.await_count, 3)
+        self.assertIn("DELETE FROM economy_stock_positions", statements[2])
+        self.assertIn("INSERT INTO economy_stock_positions", statements[3])
+        self.assertTrue(all("ON CONFLICT" in sql for sql in statements[:2] + statements[3:]))
+        self.assertEqual(connection.execute.await_count, 4)
 
     async def test_crafting_reports_every_missing_ingredient_without_mutation(self) -> None:
         store = PostgresEconomyStore.__new__(PostgresEconomyStore)

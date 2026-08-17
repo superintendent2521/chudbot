@@ -1783,6 +1783,13 @@ class PostgresEconomyStore:
                      row["covers"], row["volume_bought"], row["volume_sold"],
                      timestamp),
                 )
+            # Position rows are a complete snapshot. Remove rows that are no
+            # longer present (for example, after selling the last share) so a
+            # later reload cannot resurrect a closed position.
+            await connection.execute(
+                "DELETE FROM economy_stock_positions WHERE guild_id = %s",
+                (guild_id,),
+            )
             for row in position_rows:
                 await connection.execute(
                     """INSERT INTO economy_stock_positions

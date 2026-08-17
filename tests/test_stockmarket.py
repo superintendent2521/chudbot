@@ -257,6 +257,15 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         reloaded = await load_stock_market(store, 11)
         self.assertEqual(reloaded._players[3].longs["SPCX"].shares, 100)
 
+    async def test_reload_uses_persisted_wallet_balance(self) -> None:
+        market = StockMarket()
+        market.hydrate(
+            [],
+            [{"user_id": 3, "balance": 180049}],
+            [],
+        )
+        self.assertEqual(market._players[3].cash, 180049)
+
     async def test_rejected_trade_is_not_persisted(self) -> None:
         store = FakeStore()
         market = await load_stock_market(store, 12)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 from interactions import OptionType, SlashContext, slash_command, slash_option
@@ -19,6 +20,13 @@ def _guild_id(ctx: SlashContext) -> Optional[int]:
     if raw_id is None:
         raw_id = getattr(getattr(ctx, "guild", None), "id", None)
     return None if raw_id is None else int(raw_id)
+
+
+_TRADE_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def _trade_lock(guild_id: int) -> asyncio.Lock:
+    return _TRADE_LOCKS.setdefault(guild_id, asyncio.Lock())
 
 
 def setup(handler: CommandHandler) -> None:
@@ -69,26 +77,21 @@ def setup(handler: CommandHandler) -> None:
             return
 
         action = (action or "view").casefold()
-        market = await load_stock_market(store, guild_id)
         player_id = int(ctx.author.id)
 
         try:
-            if action == "view":
-                message = market.view()
-            elif action == "quote":
-                if not symbol:
-                    await send_ping(ctx, "Choose a ticker for the quote, such as **RKLB**.", ephemeral=True)
-                    return
-                message = market.stock(symbol, player_id)
-            elif action == "stats":
-                message = market.statistics(player_id)
-            elif action in {"buy", "sell", "short", "cover"}:
+            if action in {"buy", "sell", "short", "cover"}:
                 if not symbol or quantity is None:
                     await send_ping(ctx, "Trades need both a ticker and a positive share quantity.", ephemeral=True)
                     return
-                result, _ = await execute_stock_trade(
-                    store, market, guild_id, player_id, action, symbol, quantity
-                )
+                # Loading and saving a full market snapshot must be one
+                # serialized operation. Otherwise two simultaneous sells can
+                # both read the same holdings and both be accepted.
+                async with _trade_lock(guild_id):
+                    market = await load_stock_market(store, guild_id)
+                    result, _ = await execute_stock_trade(
+                        store, market, guild_id, player_id, action, symbol, quantity
+                    )
                 if not result.accepted:
                     await send_ping(ctx, f"❌ {result.reason}", ephemeral=True)
                     return
@@ -97,8 +100,19 @@ def setup(handler: CommandHandler) -> None:
                     f"${result.price:,.2f}. Cash: **{result.cash:,.0f} coins**."
                 )
             else:
-                await send_ping(ctx, "Unknown stock action.", ephemeral=True)
-                return
+                market = await load_stock_market(store, guild_id)
+                if action == "view":
+                    message = market.view()
+                elif action == "quote":
+                    if not symbol:
+                        await send_ping(ctx, "Choose a ticker for the quote, such as **RKLB**.", ephemeral=True)
+                        return
+                    message = market.stock(symbol, player_id)
+                elif action == "stats":
+                    message = market.statistics(player_id)
+                else:
+                    await send_ping(ctx, "Unknown stock action.", ephemeral=True)
+                    return
         except KeyError:
             await send_ping(ctx, f"Unknown ticker **{symbol}**. Try RKLB, LMT, SPCX, or GD.", ephemeral=True)
             return

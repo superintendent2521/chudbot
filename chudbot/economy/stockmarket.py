@@ -638,7 +638,9 @@ class StockMarket:
         }
         for row in account_rows:
             user_id = int(row["user_id"])
-            legacy_cash = row.get("cash")
+            # The live store returns the wallet as ``balance``; older
+            # snapshots used ``cash``. Support both when rebuilding stats.
+            legacy_cash = row.get("cash", row.get("balance"))
             self._players[user_id] = PlayerAccount(
                 cash=balance_by_user.get(
                     user_id, float(legacy_cash) if legacy_cash is not None else 0.0
