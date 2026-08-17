@@ -11,6 +11,10 @@ class BlackjackTests(unittest.TestCase):
         self.assertEqual(len(all_cards), 52)
         self.assertEqual(len(set(all_cards)), 52)
 
+    def test_dealer_does_not_start_with_blackjack(self) -> None:
+        _, _, dealer = new_game(Random(29))
+        self.assertNotEqual(hand_value(dealer), 21)
+
     def test_aces_change_from_eleven_to_one_to_prevent_bust(self) -> None:
         self.assertEqual(hand_value(["A♠", "9♥"]), 20)
         self.assertEqual(hand_value(["A♠", "9♥", "5♦"]), 15)
