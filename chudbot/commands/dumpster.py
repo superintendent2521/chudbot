@@ -8,7 +8,6 @@ import secrets
 from dataclasses import dataclass
 from typing import Any, Optional, cast
 
-from flask import ctx
 from interactions import (
     AutocompleteContext,
     Button,
