@@ -21,7 +21,8 @@ LOAN_TERM_SECONDS = 60 * 60
 MAX_LOAN_AMOUNT = 5_000
 MAX_MARKET_QUANTITY = 1_000_000
 MAX_MARKET_PRICE = 1_000_000_000
-MAX_OPEN_BUY_ORDERS = 20
+MAX_OPEN_BUY_ORDERS = 40
+MAX_OPEN_SELL_ORDERS = 40
 BUY_ORDER_TTL_SECONDS = 7 * 24 * 60 * 60
 FISH_COOLDOWN_SECONDS = 5 * 60
 MEMORY_COOLDOWN_SECONDS = 5 * 60
@@ -224,6 +225,16 @@ class BuyOrderResult:
     order_id: Optional[int]
     quantity: int
     price_each: int
+    balance: int
+
+
+@dataclass(frozen=True)
+class SellOrderResult:
+    status: Literal["created", "insufficient", "invalid", "limit"]
+    order_id: Optional[int]
+    quantity: int
+    price_each: int
+    remaining: int
     balance: int
 
 
@@ -511,6 +522,32 @@ class PostgresEconomyStore:
             await connection.execute(
                 """CREATE INDEX IF NOT EXISTS economy_buy_orders_expiry_idx
                    ON economy_buy_orders (guild_id, status, expires_at)"""
+            )
+            await connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS economy_sell_orders (
+                    id BIGSERIAL PRIMARY KEY,
+                    guild_id BIGINT NOT NULL,
+                    seller_id BIGINT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    quantity_original BIGINT NOT NULL CHECK (quantity_original > 0),
+                    quantity_remaining BIGINT NOT NULL CHECK (quantity_remaining >= 0),
+                    price_each BIGINT NOT NULL CHECK (price_each > 0),
+                    status TEXT NOT NULL DEFAULT 'open'
+                        CHECK (status IN ('open', 'filled', 'cancelled')),
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    expires_at BIGINT NOT NULL
+                )
+                """
+            )
+            await connection.execute(
+                """CREATE INDEX IF NOT EXISTS economy_sell_orders_market_idx
+                   ON economy_sell_orders (guild_id, status, item_key, price_each ASC)"""
+            )
+            await connection.execute(
+                """CREATE INDEX IF NOT EXISTS economy_sell_orders_expiry_idx
+                   ON economy_sell_orders (guild_id, status, expires_at)"""
             )
             await connection.execute(
                 """
@@ -1648,6 +1685,106 @@ class PostgresEconomyStore:
                 "item_key": item_key,
                 "quantity": quantity,
                 "price_each": price_each,
+            },
+        )
+        return result
+
+    async def create_sell_order(
+        self,
+        guild_id: int,
+        seller_id: int,
+        item_key: str,
+        quantity: int,
+        price_each: int,
+        *,
+        now: Optional[int] = None,
+    ) -> SellOrderResult:
+        """Create a player sell order with the listed inventory held in escrow."""
+        timestamp = self._now(now)
+        item_key = str(item_key).strip()
+        quantity = int(quantity)
+        price_each = int(price_each)
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            await self._ensure_accounts(connection, guild_id, seller_id)
+            balance_row = await self._fetchone(
+                connection,
+                """SELECT balance FROM economy_accounts
+                   WHERE guild_id = %s AND user_id = %s FOR UPDATE""",
+                (guild_id, seller_id),
+            )
+            balance = int(balance_row["balance"])
+            if (
+                not item_key
+                or quantity <= 0
+                or quantity > MAX_MARKET_QUANTITY
+                or price_each <= 0
+                or price_each > MAX_MARKET_PRICE
+            ):
+                return SellOrderResult(
+                    "invalid", None, quantity, price_each, 0, balance
+                )
+
+            open_count_row = await self._fetchone(
+                connection,
+                """SELECT COUNT(*) AS open_count FROM economy_sell_orders
+                   WHERE guild_id = %s AND seller_id = %s AND status = 'open'""",
+                (guild_id, seller_id),
+            )
+            if int(open_count_row["open_count"]) >= MAX_OPEN_SELL_ORDERS:
+                return SellOrderResult(
+                    "limit", None, quantity, price_each, 0, balance
+                )
+
+            inventory_row = await self._fetchone(
+                connection,
+                """SELECT quantity FROM economy_inventory
+                   WHERE guild_id = %s AND user_id = %s AND item_key = %s
+                   FOR UPDATE""",
+                (guild_id, seller_id, item_key),
+            )
+            available = 0 if inventory_row is None else int(inventory_row["quantity"])
+            if available < quantity:
+                return SellOrderResult(
+                    "insufficient", None, quantity, price_each, available, balance
+                )
+
+            remaining = available - quantity
+            if remaining:
+                await connection.execute(
+                    """UPDATE economy_inventory SET quantity = %s, updated_at = %s
+                       WHERE guild_id = %s AND user_id = %s AND item_key = %s""",
+                    (remaining, timestamp, guild_id, seller_id, item_key),
+                )
+            else:
+                await connection.execute(
+                    """DELETE FROM economy_inventory
+                       WHERE guild_id = %s AND user_id = %s AND item_key = %s""",
+                    (guild_id, seller_id, item_key),
+                )
+            order_row = await self._fetchone(
+                connection,
+                """INSERT INTO economy_sell_orders
+                        (guild_id, seller_id, item_key, quantity_original,
+                         quantity_remaining, price_each, created_at, updated_at, expires_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   RETURNING id""",
+                (
+                    guild_id, seller_id, item_key, quantity, quantity, price_each,
+                    timestamp, timestamp, timestamp + BUY_ORDER_TTL_SECONDS,
+                ),
+            )
+            result = SellOrderResult(
+                "created", int(order_row["id"]), quantity, price_each, remaining, balance
+            )
+        self._log(
+            "sell_order_created", guild_id, seller_id, 0, result.balance, timestamp,
+            details={
+                "order_id": result.order_id,
+                "item_key": item_key,
+                "quantity": quantity,
+                "price_each": price_each,
+                "expires_at": timestamp + BUY_ORDER_TTL_SECONDS,
             },
         )
         return result

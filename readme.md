@@ -40,6 +40,10 @@ Application code lives in the `chudbot` package and is grouped by feature:
 Runtime JSON data lives in `data`. See [docs/structure.md](docs/structure.md) for
 the full repository map.
 
+The service policies are available at [docs/terms-of-service.md](docs/terms-of-service.md)
+and [docs/privacy-policy.md](docs/privacy-policy.md). Replace the bracketed
+operator, contact, jurisdiction, and retention placeholders before publishing.
+
 ## Crafting recipes
 
 Crafting recipes are defined in `chudbot/economy/crafting.py`. Add a

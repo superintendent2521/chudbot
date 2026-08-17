@@ -8,6 +8,7 @@ import secrets
 from dataclasses import dataclass
 from typing import Any, Optional, cast
 
+from flask import ctx
 from interactions import (
     AutocompleteContext,
     Button,
@@ -22,7 +23,7 @@ from interactions import (
 from chudbot.command_handler import CommandHandler
 from chudbot.economy.crafting import CRAFTED_ITEMS_BY_KEY
 from chudbot.economy.responses import defer_ping, send_ping
-from chudbot.economy.store import BUY_ORDER_TTL_SECONDS, MAX_OPEN_BUY_ORDERS
+from chudbot.economy.store import *
 from chudbot.games.spaceflight_dumpster import (
     EQUIPMENT_BY_KEY,
     LOCATIONS,
@@ -385,10 +386,15 @@ def setup(handler: CommandHandler) -> None:
                 ephemeral=True,
             )
             return
-        await defer_ping(ctx, ephemeral=loot.rarity >= 4 and quantity > 0)
+        # Non-crafted market items are resolved from salvaged loot and always
+        # carry the loot item's automated price.
+        if loot.fixed_value is None or loot.rarity is None:
+            await send_ping(ctx, "That item cannot be sold automatically.", ephemeral=True)
+            return
+        await defer_ping(ctx, ephemeral=loot.rarity >= 4 and quantity > 0) # type: ignore
         confirmation = None
         confirmation_buttons = []
-        if loot.rarity >= 4 and quantity > 0:
+        if loot.rarity >= 4 and quantity > 0: # type: ignore
             confirmation_id = secrets.token_hex(8)
             confirm_button = Button(
                 custom_id=f"sell_confirm_{confirmation_id}",
@@ -402,9 +408,9 @@ def setup(handler: CommandHandler) -> None:
             )
             confirmation_buttons = [confirm_button, cancel_button]
             confirmation_message = await send_ping(ctx,
-                f"⚠️ **{_rarity_name(loot.rarity)} item confirmation**\n"
+                f"⚠️ **{_rarity_name(loot.rarity)} item confirmation**\n" # type: ignore
                 f"Sell **{quantity:,}× {loot.name}** for "
-                f"**{_format_coins(quantity * loot.coin_value)}**?",
+                f"**{_format_coins(quantity * loot.fixed_value)}**?",
                 components=confirmation_buttons,
                 ephemeral=True,
             )
@@ -436,7 +442,7 @@ def setup(handler: CommandHandler) -> None:
                 return
             await defer_ping(confirmation.ctx, edit_origin=True)
         result = await store.sell_inventory_item(
-            guild_id, int(ctx.author.id), loot.key, quantity, loot.coin_value
+            guild_id, int(ctx.author.id), loot.key, quantity, loot.fixed_value
         )
         if result.status == "invalid":
             response = "Choose a positive quantity."
@@ -504,6 +510,61 @@ def setup(handler: CommandHandler) -> None:
                 f"**{_format_coins(result.price_each)} each**. "
                 f"**{_format_coins(total)}** is held in escrow for "
                 f"**{BUY_ORDER_TTL_SECONDS // 86_400} days**."
+            )
+
+    @slash_command(
+        name="sellorder",
+        description="List an inventory item on the player marketplace",
+    )
+    @slash_option(
+        name="item", description="Item name", required=True,
+        opt_type=OptionType.STRING, autocomplete=True,
+    )
+    @slash_option(
+        name="quantity", description="Quantity to list", required=True,
+        opt_type=OptionType.INTEGER,
+    )
+    @slash_option(
+        name="price", description="Coins requested per item", required=True,
+        opt_type=OptionType.INTEGER,
+    )
+    async def sell_order_command(ctx: SlashContext, item: str, quantity: int, price: int):
+        await defer_ping(ctx)
+        guild_id = _guild_id(ctx)
+        if guild_id is None:
+            await send_ping(ctx, "Sell orders can only be posted in a server.", ephemeral=True)
+            return
+        loot = await _require_item(ctx, item)
+        if loot is None:
+            return
+        result = await store.create_sell_order(
+            guild_id, int(ctx.author.id), loot.key, quantity, price
+        )
+        if result.status == "invalid":
+            await send_ping(ctx,
+                "Quantity and price must be positive and within the market limits.",
+                ephemeral=True,
+            )
+        elif result.status == "limit":
+            await send_ping(ctx,
+                f"You already have the maximum of **{MAX_OPEN_SELL_ORDERS} "
+                "open sell orders**.",
+                ephemeral=True,
+            )
+        elif result.status == "insufficient":
+            await send_ping(ctx,
+                f"You only have **{result.remaining:,}× {loot.name}** available.",
+                ephemeral=True,
+            )
+        else:
+            total = result.quantity * result.price_each
+            await send_ping(ctx,
+                f"📉 Sell order **#{result.order_id}** posted for "
+                f"**{result.quantity:,}× {loot.name}** at "
+                f"**{_format_coins(result.price_each)} each**. "
+                f"The items are held in escrow for "
+                f"**{BUY_ORDER_TTL_SECONDS // 86_400} days** "
+                f"in exchange for **{_format_coins(total)}**."
             )
 
     @slash_command(name="market", description="View open player buy orders")
@@ -962,6 +1023,10 @@ def setup(handler: CommandHandler) -> None:
     async def buy_order_autocomplete(ctx: AutocompleteContext):
         await _send_item_autocomplete(ctx)
 
+    @sell_order_command.autocomplete("item")
+    async def sell_order_autocomplete(ctx: AutocompleteContext):
+        await _send_item_autocomplete(ctx)
+
     @market_command.autocomplete("item")
     async def market_autocomplete(ctx: AutocompleteContext):
         await _send_item_autocomplete(ctx)
@@ -986,3 +1051,4 @@ def setup(handler: CommandHandler) -> None:
     handler.register_slash_command(fill_order_command)
     handler.register_slash_command(cancel_order_command)
     handler.register_slash_command(dumpster_command)
+    handler.register_slash_command(sell_order_command)
