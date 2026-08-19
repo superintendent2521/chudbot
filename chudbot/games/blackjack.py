@@ -32,6 +32,16 @@ def new_game(rng: Any) -> tuple[list[str], list[str], list[str]]:
     rng.shuffle(deck)
     player_hand = [deck.pop(), deck.pop()]
     dealer_hand = [deck.pop(), deck.pop()]
+    if hand_value(dealer_hand) == 21:
+        deck.extend(dealer_hand)
+        for first_index, first_card in enumerate(deck):
+            for second_index in range(first_index + 1, len(deck)):
+                if hand_value([first_card, deck[second_index]]) != 21:
+                    dealer_hand = [deck.pop(second_index), deck.pop(first_index)]
+                    break
+            else:
+                continue
+            break
     return deck, player_hand, dealer_hand
 
 

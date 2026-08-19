@@ -5,11 +5,26 @@ from chudbot.games.blackjack import hand_value, new_game, play_dealer, profit
 
 
 class BlackjackTests(unittest.TestCase):
+    class DealerBlackjackRandom:
+        def shuffle(self, sequence: list[str]) -> None:
+            natural_cards = {"Aâ™£", "Kâ™£"}
+            sequence[:] = [
+                card for card in sequence if card not in natural_cards
+            ] + list(natural_cards)
+
     def test_new_game_uses_one_standard_deck(self) -> None:
         deck, player, dealer = new_game(Random(1))
         all_cards = deck + player + dealer
         self.assertEqual(len(all_cards), 52)
         self.assertEqual(len(set(all_cards)), 52)
+
+    def test_new_game_never_starts_dealer_with_blackjack(self) -> None:
+        for seed in range(1000):
+            _, _, dealer = new_game(Random(seed))
+            self.assertNotEqual(hand_value(dealer), 21)
+
+        _, _, dealer = new_game(self.DealerBlackjackRandom())
+        self.assertNotEqual(hand_value(dealer), 21)
 
     def test_aces_change_from_eleven_to_one_to_prevent_bust(self) -> None:
         self.assertEqual(hand_value(["A♠", "9♥"]), 20)
