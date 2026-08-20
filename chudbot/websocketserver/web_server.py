@@ -32,6 +32,7 @@ def main() -> None:
         password="relay-disabled",
         backend_url=os.getenv("WEB_BACKEND_URL", ""),
         backend_secret=os.getenv("WEB_BACKEND_SECRET", ""),
+        backend_ca_file=os.getenv("WEB_BACKEND_CA_FILE", ""),
     )
     tls = None
     if cert and key:

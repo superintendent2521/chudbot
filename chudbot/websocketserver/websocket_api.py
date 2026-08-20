@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import random
+import ssl
 import time
 import uuid
 from collections import deque
@@ -330,9 +331,10 @@ class EconomyWebSocket:
 class WebBackendBridge:
     """One authenticated upstream WebSocket shared by all browser clients."""
 
-    def __init__(self, url: str, secret: str) -> None:
+    def __init__(self, url: str, secret: str, ca_file: str = "") -> None:
         self.url = url
         self.secret = secret
+        self.ca_file = ca_file
         self.session: ClientSession | None = None
         self.socket: Any = None
         self.reader_task: asyncio.Task[None] | None = None
@@ -346,7 +348,10 @@ class WebBackendBridge:
             raise RuntimeError("WEB_BACKEND_URL and WEB_BACKEND_SECRET are required")
         if self.session is None:
             self.session = ClientSession()
-        self.socket = await self.session.ws_connect(self.url, heartbeat=30)
+        ssl_context = None
+        if self.url.startswith("wss://") and self.ca_file:
+            ssl_context = ssl.create_default_context(cafile=self.ca_file)
+        self.socket = await self.session.ws_connect(self.url, heartbeat=30, ssl=ssl_context)
         await self.socket.send_json({"type": "internal_auth", "secret": self.secret})
         response = await self.socket.receive()
         if response.type != WSMsgType.TEXT or json.loads(response.data).get("type") != "internal_auth_ok":
@@ -481,7 +486,7 @@ async def asset_js(_: web.Request) -> web.FileResponse:
     return web.FileResponse(os.path.join(WEB_UI_DIR, "web_app.js"))
 
 
-def create_web_app(economy_store: Any = None, *, password: str | None = None, password_hash: str | None = None, max_transfer: int = 1_000_000, backend_url: str | None = None, backend_secret: str | None = None) -> web.Application:
+def create_web_app(economy_store: Any = None, *, password: str | None = None, password_hash: str | None = None, max_transfer: int = 1_000_000, backend_url: str | None = None, backend_secret: str | None = None, backend_ca_file: str | None = None) -> web.Application:
     password = password if password is not None else os.getenv("WEB_WS_PASSWORD", "")
     password_hash = password_hash if password_hash is not None else os.getenv("WEB_WS_PASSWORD_HASH", "")
     if bool(password) == bool(password_hash):
@@ -496,6 +501,7 @@ def create_web_app(economy_store: Any = None, *, password: str | None = None, pa
     app[WEB_BRIDGE_KEY] = WebBackendBridge(
         backend_url if backend_url is not None else os.getenv("WEB_BACKEND_URL", ""),
         backend_secret if backend_secret is not None else os.getenv("WEB_BACKEND_SECRET", ""),
+        backend_ca_file if backend_ca_file is not None else os.getenv("WEB_BACKEND_CA_FILE", ""),
     )
     app.router.add_get("/health", health)
     app.router.add_get("/ws", websocket_handler)

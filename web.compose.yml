@@ -1,0 +1,21 @@
+services:
+  chudbot-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: chudbot-web
+    restart: unless-stopped
+    env_file:
+      - .env.web
+    environment:
+      CHUDBOT_ENVIRONMENT: dev
+      WEB_WS_HOST: 0.0.0.0
+      WEB_WS_PORT: "8765"
+      WEB_WS_ALLOW_INSECURE_DEV: "true"
+      WEB_BACKEND_URL: wss://chudbot-bot.taild9916d.ts.net:8766/internal-ws
+      WEB_BACKEND_CA_FILE: /certs/backend-ca.crt
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - ./certs/backend-ca.crt:/certs/backend-ca.crt:ro
+    command: ["python", "-m", "chudbot.websocketserver.web_server"]

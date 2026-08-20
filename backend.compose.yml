@@ -1,0 +1,20 @@
+services:
+  chudbot-web-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: chudbot-web-backend
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env.backend
+    environment:
+      CHUDBOT_ENVIRONMENT: main
+      DATABASE_URL: postgresql://postgres:postgres@192.168.0.187:5432/economy
+      WEB_BACKEND_HOST: 100.70.143.47
+      WEB_BACKEND_PORT: "8766"
+      WEB_BACKEND_TLS_CERT: /certs/chudbot-bot.crt
+      WEB_BACKEND_TLS_KEY: /certs/chudbot-bot.key
+    volumes:
+      - ./certs:/certs:ro
+    command: ["python", "-m", "chudbot.websocketserver.web_backend"]
