@@ -23,19 +23,14 @@ and Lavalink-powered music features.
 ## Development environment
 
 Install Docker Desktop, leave it running with the Linux engine enabled, and
-run the complete local stack from PowerShell. The
-launcher automatically creates `.venv` and installs `requirements.txt` the
-first time:
+run the complete development stack from PowerShell:
 
 ```powershell
-\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
 .\scripts\start-dev.ps1
 ```
 
-This starts the development PostgreSQL container, the bot with
-`CHUDBOT_ENVIRONMENT=dev`, and the WSS server. Set `DEV_FRONTEND_COMMAND` in
-`.env` (for example, `npm run dev`) to add frontend startup automatically, or
+This builds and starts PostgreSQL, the bot, and the WebSocket server in Docker,
+with `CHUDBOT_ENVIRONMENT=dev`.
 use `.\scripts\start-dev.ps1 -NoFrontend`. Use `-KeepDatabase` to leave
 PostgreSQL running after the local processes stop.
 
@@ -90,6 +85,11 @@ This moves the bot's virtual coins through the existing transaction-safe store;
 WebSocket password. It is not a real-money payment API. Keep the endpoint behind a firewall or
 reverse proxy, use a certificate trusted by the web host, and never expose it
 without TLS.
+
+The same endpoint serves the browser dashboard at `/`. The dashboard generates a six-character code; run
+`/register code:<code>` in the Discord server to link the current Discord account and server. The browser then
+authenticates with that linked code, so the shared WebSocket password is never exposed to the client. New games can
+add their own WebSocket operations and independent dashboard modules.
 
 ## Crafting recipes
 

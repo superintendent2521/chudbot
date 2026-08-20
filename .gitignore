@@ -5,3 +5,4 @@ __pycache__/
 data/*.json
 economy.db*
 logs/*.log
+node_modules/

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Chudbot</title>
+    <link rel="stylesheet" href="/assets/app.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header>
+        <a class="brand" href="/"><span>C</span> chudbot</a>
+        <div id="connection" class="status"><i></i> offline</div>
+      </header>
+      <section id="link-view" class="link-box">
+        <h1>chudbot</h1>
+        <p>Copy the code and run <code>/register</code> in Discord.</p>
+        <div class="code-box">
+          <b id="code">------</b><button id="copy">copy</button>
+        </div>
+        <button id="check" class="button">check connection</button
+        ><small id="link-message">Waiting for you to register the code.</small>
+      </section>
+      <section id="dashboard" hidden>
+        <div class="dash-title">
+          <h1>your stuff</h1>
+          <button id="new-code" class="button muted-button">relink</button>
+        </div>
+        <div class="container">
+          <h2>your data</h2>
+          <div class="data-grid">
+            <div><small>coins</small><strong id="balance">—</strong></div>
+            <div><small>loan</small><strong id="loan">—</strong></div>
+            <div><small>security</small><strong id="security">—</strong></div>
+            <div>
+              <small>dumpster speed</small><strong id="speed">—</strong>
+            </div>
+          </div>
+        </div>
+        <div class="container">
+          <h2>Bets</h2>
+          <div id="activity" class="activity">
+            <p class="empty">nothing yet</p>
+          </div>
+        </div>
+        <div class="container">
+          <h2>games</h2>
+          <div id="games" class="games">
+            <div><b>economy</b><small>your coins and activity</small></div>
+            <div><b>more later</b><small>new games will go here</small></div>
+          </div>
+        </div>
+      </section>
+      <footer>chudbot</footer>
+    </main>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import logging
 import time
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping, Optional
 
@@ -393,6 +394,17 @@ class PostgresEconomyStore:
                 """
             )
             await connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS web_links (
+                    code_hash TEXT PRIMARY KEY,
+                    guild_id BIGINT,
+                    user_id BIGINT,
+                    created_at BIGINT NOT NULL,
+                    linked_at BIGINT
+                )
+                """
+            )
+            await connection.execute(
                 """ALTER TABLE economy_accounts
                    ADD COLUMN IF NOT EXISTS security_level INTEGER NOT NULL DEFAULT 0
                    CHECK (security_level BETWEEN 0 AND 20)"""
@@ -660,6 +672,50 @@ class PostgresEconomyStore:
             )
             return int(row["balance"])
 
+    @staticmethod
+    def _web_code_hash(code: str) -> str:
+        return hashlib.sha256(code.strip().upper().encode("utf-8")).hexdigest()
+
+    async def web_register_code(self, code: str) -> dict[str, Any]:
+        """Create a pending browser link or return its current state."""
+        code_hash = self._web_code_hash(code)
+        now = int(time.time())
+        async with self._pool.connection() as connection:
+            row = await connection.execute(
+                "SELECT guild_id, user_id, linked_at FROM web_links WHERE code_hash = %s",
+                (code_hash,),
+            )
+            existing = await row.fetchone()
+            if existing:
+                return {"linked": existing["linked_at"] is not None, "guild_id": existing["guild_id"], "user_id": existing["user_id"]}
+            await connection.execute(
+                "INSERT INTO web_links (code_hash, created_at) VALUES (%s, %s)",
+                (code_hash, now),
+            )
+        return {"linked": False, "guild_id": None, "user_id": None}
+
+    async def complete_web_registration(self, code: str, guild_id: int, user_id: int) -> bool:
+        """Bind a pending browser code to a Discord account."""
+        code_hash = self._web_code_hash(code)
+        now = int(time.time())
+        async with self._pool.connection() as connection:
+            result = await connection.execute(
+                """UPDATE web_links SET guild_id = %s, user_id = %s, linked_at = %s
+                   WHERE code_hash = %s AND linked_at IS NULL""",
+                (guild_id, user_id, now, code_hash),
+            )
+            return result.rowcount == 1
+
+    async def web_link_for_code(self, code: str) -> Optional[dict[str, int]]:
+        code_hash = self._web_code_hash(code)
+        async with self._pool.connection() as connection:
+            row = await connection.execute(
+                "SELECT guild_id, user_id FROM web_links WHERE code_hash = %s AND linked_at IS NOT NULL",
+                (code_hash,),
+            )
+            result = await row.fetchone()
+        return None if result is None else {"guild_id": int(result["guild_id"]), "user_id": int(result["user_id"])}
+
     async def peek_balance(self, guild_id: int, user_id: int) -> Optional[int]:
         connection_context = await self._connection()
         async with connection_context as connection:
@@ -670,6 +726,40 @@ class PostgresEconomyStore:
                 (guild_id, user_id),
             )
             return None if row is None else int(row["balance"])
+
+    async def web_profile(self, guild_id: int, user_id: int) -> dict[str, int]:
+        """Return the small account summary used by the web dashboard."""
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            row = await self._fetchone(
+                connection,
+                """SELECT balance, loan_balance, security_level, dumpster_speed_tier
+                   FROM economy_accounts WHERE guild_id = %s AND user_id = %s""",
+                (guild_id, user_id),
+            )
+        if row is None:
+            return {"balance": 0, "loan_balance": 0, "security_level": 0, "dumpster_speed_tier": 0}
+        return {key: int(row[key]) for key in ("balance", "loan_balance", "security_level", "dumpster_speed_tier")}
+
+    async def web_recent_activity(self, guild_id: int, user_id: int, limit: int = 5) -> list[dict[str, Any]]:
+        """Return recent account events without exposing other users' activity."""
+        limit = min(10, max(1, int(limit)))
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            rows = await self._fetchall(
+                connection,
+                """SELECT event_type, amount, balance_after, occurred_at, details
+                   FROM economy_log
+                   WHERE guild_id = %s AND user_id = %s
+                   ORDER BY occurred_at DESC, id DESC LIMIT %s""",
+                (guild_id, user_id, limit),
+            )
+        return [
+            {"event": row["event_type"], "amount": int(row["amount"]),
+             "balance": None if row["balance_after"] is None else int(row["balance_after"]),
+             "at": int(row["occurred_at"]), "details": row["details"] or {}}
+            for row in rows
+        ]
 
     async def mint(
         self,

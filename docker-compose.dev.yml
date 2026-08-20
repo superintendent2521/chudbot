@@ -17,5 +17,41 @@ services:
       timeout: 5s
       retries: 20
 
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    env_file:
+      - .env
+    environment:
+      CHUDBOT_ENVIRONMENT: dev
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/economy
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["python", "index.py"]
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    env_file:
+      - .env
+    environment:
+      CHUDBOT_ENVIRONMENT: dev
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/economy
+      WEB_WS_HOST: 0.0.0.0
+      WEB_WS_PORT: 8765
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8765:8765"
+    command: ["python", "-m", "chudbot.websocketserver.web_server"]
+
 volumes:
   chudbot-dev-postgres:
