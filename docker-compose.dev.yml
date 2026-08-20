@@ -41,17 +41,38 @@ services:
       - .env
     environment:
       CHUDBOT_ENVIRONMENT: dev
-      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/economy
       WEB_WS_HOST: 0.0.0.0
       WEB_WS_PORT: 8765
+      WEB_BACKEND_URL: ws://bot-backend:8766/internal-ws
+      WEB_BACKEND_SECRET: dev-internal-web-secret
+    volumes:
+      - .:/app
+    depends_on:
+      bot-backend:
+        condition: service_started
+    ports:
+      - "8765:8765"
+    command: ["python", "-m", "chudbot.websocketserver.web_server"]
+
+  bot-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    env_file:
+      - .env
+    environment:
+      CHUDBOT_ENVIRONMENT: dev
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/economy
+      WEB_BACKEND_HOST: 0.0.0.0
+      WEB_BACKEND_PORT: 8766
+      WEB_BACKEND_SECRET: dev-internal-web-secret
+      WEB_BACKEND_ALLOW_INSECURE_DEV: "true"
     volumes:
       - .:/app
     depends_on:
       postgres:
         condition: service_healthy
-    ports:
-      - "8765:8765"
-    command: ["python", "-m", "chudbot.websocketserver.web_server"]
+    command: ["python", "-m", "chudbot.websocketserver.web_backend"]
 
 volumes:
   chudbot-dev-postgres:

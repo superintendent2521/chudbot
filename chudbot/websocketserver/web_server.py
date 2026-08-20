@@ -12,7 +12,6 @@ if os.name == "nt":
 from aiohttp import web
 from dotenv import load_dotenv
 
-from chudbot.economy.store import DEFAULT_POSTGRES_URL, PostgresEconomyStore
 from chudbot.websocketserver.websocket_api import create_web_app
 
 
@@ -27,17 +26,13 @@ def main() -> None:
     )
     if (not cert or not key) and not allow_insecure_dev:
         raise RuntimeError("WEB_WS_TLS_CERT and WEB_WS_TLS_KEY are required for WSS")
-    store = PostgresEconomyStore(os.getenv("ECONOMY_DATABASE_URL") or os.getenv("DATABASE_URL") or DEFAULT_POSTGRES_URL)
-    app = create_web_app(store, max_transfer=int(os.getenv("WEB_WS_MAX_TRANSFER", "1000000")))
-
-    async def startup(_: web.Application) -> None:
-        await store.open()
-
-    async def cleanup(_: web.Application) -> None:
-        await store.close()
-
-    app.on_startup.append(startup)
-    app.on_cleanup.append(cleanup)
+    # The public server is deliberately store-less. All economy operations are
+    # relayed over the single authenticated bot-backend connection.
+    app = create_web_app(
+        password="relay-disabled",
+        backend_url=os.getenv("WEB_BACKEND_URL", ""),
+        backend_secret=os.getenv("WEB_BACKEND_SECRET", ""),
+    )
     tls = None
     if cert and key:
         tls = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)

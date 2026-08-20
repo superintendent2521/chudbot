@@ -197,6 +197,79 @@ code {
   border-radius: 4px;
   padding: 17px;
 }
+.game-card.active-game {
+  border: 1px solid #5865f2;
+}
+.game-card .button {
+  margin-top: 8px;
+  padding: 8px 12px;
+}
+.game-panel {
+  border: 1px solid #5865f2;
+}
+.game-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 18px;
+}
+.game-heading small, label {
+  color: #949ba4;
+  font-size: 12px;
+}
+label {
+  display: block;
+  margin-bottom: 7px;
+}
+select {
+  width: 100%;
+  background: #1e1f22;
+  border: 1px solid #4f545c;
+  border-radius: 4px;
+  color: #dcddde;
+  padding: 10px;
+  margin-bottom: 15px;
+}
+.salvage-locations {
+  display: grid;
+  gap: 10px;
+}
+.salvage-location {
+  background: #313338;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #dcddde;
+  cursor: pointer;
+  padding: 13px;
+  text-align: left;
+}
+.salvage-location:hover {
+  border-color: #5865f2;
+}
+.salvage-location b, .salvage-location small {
+  display: block;
+}
+.salvage-location small {
+  color: #949ba4;
+  margin-top: 5px;
+}
+.salvage-status {
+  color: #fff;
+  font-weight: bold;
+  margin-bottom: 15px;
+}
+.salvage-haul {
+  background: #1e1f22;
+  border-radius: 4px;
+  min-height: 50px;
+  padding: 14px;
+  margin-bottom: 15px;
+}
+.salvage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+}
 .games b {
   display: block;
   color: #fff;

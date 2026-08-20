@@ -45,6 +45,7 @@ function connect() {
       $("dashboard").hidden = false;
       send({ type: "profile" });
       send({ type: "recent_activity" });
+      send({ type: "salvage_options" });
     } else if (m.type === "registration_pending") {
       status("waiting");
       $("link-message").textContent =
@@ -58,13 +59,72 @@ function connect() {
       ])
         $(id).textContent = Number(value).toLocaleString();
     } else if (m.type === "recent_activity") activity(m.items);
+    else if (m.type === "salvage_options") drawSalvageOptions(m);
+    else if (m.type === "salvage_cooldown") {
+      showSalvageMessage(`The salvage sites are empty for ${formatWait(m.retry_after)}.`);
+    } else if (m.type === "salvage_started" || m.type === "salvage_progress") {
+      showSalvageRun(m);
+      if (m.balance !== undefined) $("balance").textContent = Number(m.balance).toLocaleString();
+    } else if (m.type === "salvage_complete" || m.type === "salvage_left" || m.type === "salvage_hazard") {
+      showSalvageResult(m);
+      if (m.balance !== undefined) $("balance").textContent = Number(m.balance).toLocaleString();
+      send({ type: "salvage_options" });
+      send({ type: "recent_activity" });
+    }
     else if (m.type === "error")
-      $("link-message").textContent = m.message || "Connection rejected.";
+      showSalvageMessage(m.message || "Connection rejected.");
   };
   ws.onclose = () => {
     if (!$("dashboard").hidden) status("offline");
   };
 }
+function formatWait(seconds) {
+  const minutes = Math.floor(Number(seconds) / 60);
+  const rest = Number(seconds) % 60;
+  return minutes ? `${minutes}m ${rest}s` : `${rest}s`;
+}
+function showSalvageMessage(message) {
+  $("salvage-message").textContent = message;
+}
+function drawSalvageOptions(m) {
+  const select = $("salvage-equipment");
+  select.innerHTML = '<option value="">none</option>';
+  for (const item of m.equipment) {
+    const option = document.createElement("option");
+    option.value = item.key;
+    option.textContent = `${item.emoji} ${item.name} (${item.available}) — ${item.description}`;
+    option.disabled = !item.available;
+    select.append(option);
+  }
+  $("salvage-locations").innerHTML = m.locations.map((location) =>
+    `<button class="salvage-location" data-location="${location.key}"><b>${location.emoji} ${location.name}</b><small>${location.description}</small></button>`
+  ).join("");
+  document.querySelectorAll("[data-location]").forEach((button) => {
+    button.onclick = () => send({ type: "salvage_start", location: button.dataset.location, equipment: select.value || null });
+  });
+}
+function haulText(items) {
+  return items.length ? items.map((item) => `${item.emoji} ${item.name} ×${item.quantity}`).join("<br>") : "Nothing yet";
+}
+function showSalvageRun(m) {
+  $("salvage-setup").hidden = true;
+  $("salvage-run").hidden = false;
+  $("salvage-message").textContent = "";
+  $("salvage-status").textContent = `${m.location.emoji} ${m.location.name} — round ${m.round}/${m.max_rounds}`;
+  $("salvage-haul").innerHTML = `<small>current haul</small><br>${haulText(m.haul)}`;
+}
+function showSalvageResult(m) {
+  $("salvage-run").hidden = true;
+  $("salvage-setup").hidden = false;
+  const prefix = m.hazard ? "🚨 Security patrol! You escaped. " : m.type === "salvage_left" ? "🏃 You left with your haul. " : "✅ Salvage run complete. ";
+  const lost = m.lost?.length ? `<br>Lost: ${haulText(m.lost)}` : "";
+  showSalvageMessage(`${prefix}Saved: ${haulText(m.saved)}${lost}`);
+}
+$("open-salvage").onclick = () => { $("salvage").hidden = false; $("salvage").scrollIntoView({ behavior: "smooth" }); send({ type: "salvage_options" }); };
+$("close-salvage").onclick = () => { $("salvage").hidden = true; };
+document.querySelectorAll("[data-salvage-action]").forEach((button) => {
+  button.onclick = () => send({ type: "salvage_action", action: button.dataset.salvageAction });
+});
 $("check").onclick = () => {
   localStorage.setItem(key, state.code);
   connect();

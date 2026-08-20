@@ -67,12 +67,17 @@ operator, contact, jurisdiction, and retention placeholders before publishing.
 
 ## Web economy WebSocket
 
-The optional web endpoint is started separately with `python -m chudbot.websocketserver.web_server`.
-It serves `wss://HOST:PORT/ws` and requires TLS certificate/key paths plus exactly
-one of `WEB_WS_PASSWORD` or the recommended PBKDF2 `WEB_WS_PASSWORD_HASH`.
-Generate the latter with `python -m chudbot.websocketserver.websocket_password`, then put the
-result in `.env` (which is ignored by git). The first WebSocket message must be
-`{"type":"auth","password":"..."}`. After `auth_ok`, supported messages are:
+The web endpoint is split into a public relay and a private bot-side backend. Start the
+public relay with `python -m chudbot.websocketserver.web_server` and the economy backend
+with `python -m chudbot.websocketserver.web_backend`. The public relay serves
+`wss://HOST:PORT/ws`; it has no database connection and accepts only registration codes.
+It forwards all authenticated requests over one authenticated upstream WebSocket to the
+bot-side backend. In production, configure WSS certificates for both endpoints and keep the
+backend endpoint on a private network; never publish its port.
+
+The first browser WebSocket message is:
+
+`{"type":"auth","code":"ABC123"}`. After `auth_ok`, supported messages are:
 
 ```json
 {"type":"balance","guild_id":123,"user_id":456}
@@ -80,11 +85,9 @@ result in `.env` (which is ignored by git). The first WebSocket message must be
 {"type":"mint","guild_id":123,"user_id":456,"amount":100}
 ```
 
-This moves the bot's virtual coins through the existing transaction-safe store;
-`mint` creates virtual coins and is available to any client with the shared
-WebSocket password. It is not a real-money payment API. Keep the endpoint behind a firewall or
-reverse proxy, use a certificate trusted by the web host, and never expose it
-without TLS.
+These operations are executed only by the bot-side backend through the existing
+transaction-safe store. `mint` is not a real-money payment API. The internal backend
+requires `WEB_BACKEND_SECRET` and must remain private.
 
 The same endpoint serves the browser dashboard at `/`. The dashboard generates a six-character code; run
 `/register code:<code>` in the Discord server to link the current Discord account and server. The browser then
