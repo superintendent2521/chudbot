@@ -52,6 +52,7 @@ class EconomySecurityTests(unittest.TestCase):
             "upgrade_security",
             "upgrade_dumpster_speed",
             "gift",
+            "mint",
             "rob",
         ):
             self.assertTrue(

@@ -1,5 +1,7 @@
 .env
 __pycache__/
+.venv/
 *.pyc
 data/*.json
 economy.db*
+logs/*.log

@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: chudbot-dev-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: economy
+    ports:
+      - "5432:5432"
+    volumes:
+      - chudbot-dev-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d economy"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  chudbot-dev-postgres:

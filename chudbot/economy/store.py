@@ -671,6 +671,36 @@ class PostgresEconomyStore:
             )
             return None if row is None else int(row["balance"])
 
+    async def mint(
+        self,
+        guild_id: int,
+        user_id: int,
+        amount: int,
+        *,
+        now: Optional[int] = None,
+    ) -> int:
+        """Create virtual coins for an account and record an audit event."""
+        timestamp = self._now(now)
+        amount = int(amount)
+        if amount <= 0:
+            raise ValueError("Mint amount must be positive")
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            row = await self._fetchone(
+                connection,
+                """INSERT INTO economy_accounts
+                       (guild_id, user_id, balance, last_activity)
+                   VALUES (%s, %s, %s + %s, %s)
+                   ON CONFLICT (guild_id, user_id) DO UPDATE
+                   SET balance = economy_accounts.balance + %s,
+                       last_activity = EXCLUDED.last_activity
+                   RETURNING balance""",
+                (guild_id, user_id, STARTING_BALANCE, amount, timestamp, amount),
+            )
+            balance = int(row["balance"])
+        self._log("mint", guild_id, user_id, amount, balance, timestamp)
+        return balance
+
     async def leaderboard(
         self,
         guild_id: int,

@@ -47,7 +47,10 @@ GEM_BOARD_DATA_FILE = os.path.join(DATA_DIR, "gem_board_channels.json")
 COAL_BOARD_DATA_FILE = os.path.join(DATA_DIR, "coal_board_channels.json")
 AUDIT_LOG_DATA_FILE = os.path.join(DATA_DIR, "audit_log_channels.json")
 
-ENVIRONMENT = "main"  # or 'dev'
+ENVIRONMENT = os.getenv("CHUDBOT_ENVIRONMENT", "main").strip().lower()
+if ENVIRONMENT not in {"main", "dev"}:
+    logger.warning("Unknown CHUDBOT_ENVIRONMENT=%s; using main", ENVIRONMENT)
+    ENVIRONMENT = "main"
 BOT_TOKEN = os.getenv(f"BOT_TOKEN_{ENVIRONMENT.upper()}")
 
 MUSIC_DJ_ROLE_ID_RAW = os.getenv("MUSIC_DJ_ROLE_ID")
