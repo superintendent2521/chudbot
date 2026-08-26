@@ -46,12 +46,12 @@
         <div class="container">
           <h2>games</h2>
           <div id="games" class="games">
-            <div class="game-card active-game"><b>☄️ Asteroid Salvage</b><small>Search dangerous spaceflight scrap for rare loot.</small><button id="open-salvage" class="button">play</button></div>
+            <div class="game-card active-game"><b>☄️ Asteroid Salvage</b><small>Scan, mine, and escape with rare loot from derelict space sites.</small><button id="open-salvage" class="button">play</button></div>
             <div><b>more later</b><small>new games will go here</small></div>
           </div>
         </div>
         <div id="salvage" class="container game-panel" hidden>
-          <div class="game-heading"><div><h2>☄️ Asteroid Salvage</h2><small>Choose a site, then decide how deep to search.</small></div><button id="close-salvage" class="button muted-button">close</button></div>
+          <div class="game-heading"><div><h2>☄️ Asteroid Salvage</h2><small>Scan sectors, manage fuel, and bring the haul home before your hull gives out.</small></div><button id="close-salvage" class="button muted-button">close</button></div>
           <div id="salvage-setup">
             <label for="salvage-equipment">equipment</label>
             <select id="salvage-equipment"><option value="">none</option></select>
@@ -60,7 +60,7 @@
           <div id="salvage-run" hidden>
             <div id="salvage-status" class="salvage-status"></div>
             <div id="salvage-haul" class="salvage-haul"></div>
-            <div class="salvage-actions"><button data-salvage-action="rummage" class="button">🔎 rummage</button><button data-salvage-action="deep" class="button">⛏️ dig deeper</button><button data-salvage-action="leave" class="button muted-button">leave</button></div>
+            <div class="salvage-actions"><button data-salvage-action="scan" class="button">📡 scan sector</button><button data-salvage-action="mine" class="button">⛏️ mine</button><button data-salvage-action="deep" class="button">💥 deep-mine</button><button data-salvage-action="leave" class="button muted-button">return home</button></div>
           </div>
           <p id="salvage-message" class="empty"></p>
         </div>

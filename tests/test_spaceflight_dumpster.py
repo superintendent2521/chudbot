@@ -1,6 +1,7 @@
 import random
 import unittest
 
+from chudbot.economy.crafting import CRAFTED_ITEMS_BY_KEY
 from chudbot.games.spaceflight_dumpster import (
     EQUIPMENT_BY_KEY,
     LOCATIONS,
@@ -66,9 +67,9 @@ class SpaceflightDumpsterTests(unittest.TestCase):
     def test_toolbox_adds_one_round(self) -> None:
         self.assertEqual(EQUIPMENT_BY_KEY["toolbox"].extra_rounds, 1)
 
-    def test_every_equipment_key_is_real_loot(self) -> None:
-        loot_keys = {item.key for item in LOOT}
-        self.assertLessEqual(set(EQUIPMENT_BY_KEY), loot_keys)
+    def test_every_equipment_key_is_real_inventory_item(self) -> None:
+        inventory_keys = {item.key for item in LOOT} | set(CRAFTED_ITEMS_BY_KEY)
+        self.assertLessEqual(set(EQUIPMENT_BY_KEY), inventory_keys)
 
 
 if __name__ == "__main__":

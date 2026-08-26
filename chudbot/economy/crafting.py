@@ -98,6 +98,39 @@ RECIPES = (
         ),
         "Everything needed to make an old capsule look almost spaceworthy.",
     ),
+    CraftingRecipe(
+        "ion_fuel_cell",
+        CraftingItem("ion_fuel_cell", "Ion Fuel Cell", "🔋"),
+        1,
+        (
+            RecipeIngredient("pressure_regulator", 1),
+            RecipeIngredient("thermal_blanket", 2),
+            RecipeIngredient("scrap_wiring", 2),
+        ),
+        "A volatile fuel cell that gives an asteroid expedition extra range.",
+    ),
+    CraftingRecipe(
+        "hull_patch_plating",
+        CraftingItem("hull_patch_plating", "Hull Patch Plating", "🛡️"),
+        1,
+        (
+            RecipeIngredient("eva_patch_kit", 1),
+            RecipeIngredient("ball_valve", 1),
+            RecipeIngredient("scrap_wiring", 2),
+        ),
+        "Emergency plating that softens the impact of asteroid hazards.",
+    ),
+    CraftingRecipe(
+        "quantum_scanner",
+        CraftingItem("quantum_scanner", "Quantum Scanner", "📡"),
+        1,
+        (
+            RecipeIngredient("tracking_array", 1),
+            RecipeIngredient("star_tracker", 1),
+            RecipeIngredient("insulated_cable", 2),
+        ),
+        "A tuned scanner that makes rare salvage easier to identify.",
+    ),
 )
 
 RECIPES_BY_KEY = {recipe.key: recipe for recipe in RECIPES}

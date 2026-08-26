@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from chudbot.economy.crafting import CRAFTED_ITEMS_BY_KEY
+
 
 @dataclass(frozen=True)
 class DumpsterLoot:
@@ -32,6 +34,7 @@ class DumpsterEquipment:
     hazard_reduction: float = 0.0
     rarity_bonus: float = 0.0
     extra_rounds: int = 0
+    extra_fuel: int = 0
     unlocks_special_location: bool = False
 
 
@@ -57,7 +60,7 @@ LOOT_BY_KEY = {item.key: item for item in LOOT}
 LOCATIONS = (
     DumpsterLocation(
         "contractor",
-        "Contractor Scrap Yard",
+        "Orbital Salvage Ring",
         "Balanced salvage with fewer security patrols.",
         "🏭",
         0.06,
@@ -65,7 +68,7 @@ LOCATIONS = (
     ),
     DumpsterLocation(
         "test_stand",
-        "Test Stand Dumpster",
+        "Ion Engine Graveyard",
         "More propulsion hardware, but it is still warm.",
         "🔥",
         0.12,
@@ -73,7 +76,7 @@ LOCATIONS = (
     ),
     DumpsterLocation(
         "museum",
-        "Museum Loading Dock",
+        "Lunar Cargo Quarantine",
         "Better odds for historic hardware and angry guards.",
         "🏛️",
         0.14,
@@ -85,7 +88,7 @@ LOCATIONS_BY_KEY = {location.key: location for location in LOCATIONS}
 
 SPECIAL_LOCATION = DumpsterLocation(
     "vehicle_assembly_building",
-    "Vehicle Assembly Building",
+    "Derelict Assembly Spire",
     "Restricted high-value salvage with heavy security.",
     "🏗️",
     0.22,
@@ -110,8 +113,23 @@ EQUIPMENT = (
     ),
     DumpsterEquipment(
         "access_card",
-        "Unlocks the restricted Vehicle Assembly Building.",
+        "Unlocks the restricted Derelict Assembly Spire.",
         unlocks_special_location=True,
+    ),
+    DumpsterEquipment(
+        "ion_fuel_cell",
+        "Adds three fuel to the expedition.",
+        extra_fuel=3,
+    ),
+    DumpsterEquipment(
+        "hull_patch_plating",
+        "Reduces asteroid hazard chance by 8 percentage points.",
+        hazard_reduction=0.08,
+    ),
+    DumpsterEquipment(
+        "quantum_scanner",
+        "Improves the rarity weighting of every item roll.",
+        rarity_bonus=0.35,
     ),
 )
 
@@ -129,6 +147,9 @@ def resolve_loot(query: str) -> DumpsterLoot | None:
 
 def resolve_equipment(query: str) -> DumpsterEquipment | None:
     item = resolve_loot(query)
+    if item is None:
+        normalized = query.strip().casefold().replace(" ", "_")
+        item = CRAFTED_ITEMS_BY_KEY.get(normalized)
     return None if item is None else EQUIPMENT_BY_KEY.get(item.key)
 
 

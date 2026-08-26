@@ -529,6 +529,7 @@ def setup(handler: CommandHandler) -> None:
             int(ctx.author.id),
             amount,
             profit=profit,
+            wager_type="slots",
         )
         if not result.accepted:
             await send_ping(ctx,
@@ -591,6 +592,7 @@ def setup(handler: CommandHandler) -> None:
             int(ctx.author.id),
             amount,
             profit=profit,
+            wager_type=f"roulette_{selected_color}",
         )
         if not result.accepted:
             await send_ping(ctx,
@@ -658,6 +660,7 @@ def setup(handler: CommandHandler) -> None:
             player_id,
             amount,
             profit=-amount,
+            wager_type="blackjack",
         )
         if not reserved.accepted:
             await send_ping(game_ctx,
@@ -677,7 +680,9 @@ def setup(handler: CommandHandler) -> None:
                 play_dealer(deck, dealer_hand)
             net_profit, outcome = blackjack_profit(player_hand, dealer_hand, amount)
             payout = amount + net_profit
-            balance = await store.pay_reserved_wager(guild_id, player_id, payout)
+            balance = await store.pay_reserved_wager(
+                guild_id, player_id, payout, wager_type="blackjack"
+            )
             if net_profit > 0:
                 change = f"You gained **{_format_coins(net_profit)}**."
             elif net_profit < 0:

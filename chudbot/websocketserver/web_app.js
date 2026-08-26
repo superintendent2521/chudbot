@@ -17,6 +17,16 @@ function send(x) {
   if (state.socket?.readyState === 1) state.socket.send(JSON.stringify(x));
 }
 function eventName(item) {
+  const wagerType = item.details?.wager_type;
+  const labels = {
+    coin_flip: "Coin Flip",
+    slots: "Slots",
+    blackjack: "Blackjack",
+    roulette_red: "Roulette — Red",
+    roulette_black: "Roulette — Black",
+    roulette_green: "Roulette — Green",
+  };
+  if (wagerType) return labels[wagerType] || wagerType.replaceAll("_", " ");
   return item.event.replaceAll("_", " ");
 }
 function activity(items) {
@@ -62,10 +72,10 @@ function connect() {
     else if (m.type === "salvage_options") drawSalvageOptions(m);
     else if (m.type === "salvage_cooldown") {
       showSalvageMessage(`The salvage sites are empty for ${formatWait(m.retry_after)}.`);
-    } else if (m.type === "salvage_started" || m.type === "salvage_progress") {
+    } else if (m.type === "salvage_started" || m.type === "salvage_progress" || m.type === "salvage_scan" || m.type === "salvage_hazard_progress") {
       showSalvageRun(m);
       if (m.balance !== undefined) $("balance").textContent = Number(m.balance).toLocaleString();
-    } else if (m.type === "salvage_complete" || m.type === "salvage_left" || m.type === "salvage_hazard") {
+    } else if (m.type === "salvage_complete" || m.type === "salvage_left" || m.type === "salvage_hazard" || m.type === "salvage_destroyed" || m.type === "salvage_out_of_fuel") {
       showSalvageResult(m);
       if (m.balance !== undefined) $("balance").textContent = Number(m.balance).toLocaleString();
       send({ type: "salvage_options" });
@@ -109,14 +119,15 @@ function haulText(items) {
 function showSalvageRun(m) {
   $("salvage-setup").hidden = true;
   $("salvage-run").hidden = false;
-  $("salvage-message").textContent = "";
-  $("salvage-status").textContent = `${m.location.emoji} ${m.location.name} — round ${m.round}/${m.max_rounds}`;
+  $("salvage-message").textContent = m.message || "";
+  $("salvage-status").textContent = `${m.location.emoji} ${m.location.name} — sector ${m.round}/${m.max_rounds} · ⛽ ${m.fuel} fuel · 🛡️ ${m.hull} hull · 🔥 combo ${m.combo}`;
   $("salvage-haul").innerHTML = `<small>current haul</small><br>${haulText(m.haul)}`;
+  if (m.scan) $("salvage-message").textContent += " Scan bonus active: +25% rare-loot weighting.";
 }
 function showSalvageResult(m) {
   $("salvage-run").hidden = true;
   $("salvage-setup").hidden = false;
-  const prefix = m.hazard ? "🚨 Security patrol! You escaped. " : m.type === "salvage_left" ? "🏃 You left with your haul. " : "✅ Salvage run complete. ";
+  const prefix = m.type === "salvage_destroyed" ? "💥 Your ship was destroyed. " : m.type === "salvage_out_of_fuel" ? "⛽ You ran out of fuel. " : m.hazard ? "🚨 A hazard damaged your ship. " : m.type === "salvage_left" ? "🏠 You returned with your haul. " : "✅ Expedition complete. ";
   const lost = m.lost?.length ? `<br>Lost: ${haulText(m.lost)}` : "";
   showSalvageMessage(`${prefix}Saved: ${haulText(m.saved)}${lost}`);
 }
@@ -143,4 +154,5 @@ $("new-code").onclick = () => {
   draw();
 };
 draw();
-if (localStorage.getItem(key)) connect();
+if (!localStorage.getItem(key)) localStorage.setItem(key, state.code);
+connect();

@@ -985,6 +985,7 @@ class PostgresEconomyStore:
             user_id,
             amount,
             profit=amount if won else -amount,
+            wager_type="coin_flip",
             now=now,
         )
         return GambleResult(
@@ -1001,6 +1002,7 @@ class PostgresEconomyStore:
         amount: int,
         *,
         profit: int,
+        wager_type: str = "unknown",
         now: Optional[int] = None,
     ) -> WagerResult:
         """Atomically settle a wager in one database round trip."""
@@ -1052,12 +1054,13 @@ class PostgresEconomyStore:
                 )
         if result is None:
             return await self.settle_wager(
-                guild_id, user_id, amount, profit=profit, now=timestamp
+                guild_id, user_id, amount, profit=profit,
+                wager_type=wager_type, now=timestamp
             )
         if result.accepted:
             self._log(
                 "wager", guild_id, user_id, result.profit, result.balance, timestamp,
-                details={"wager": result.amount},
+                details={"wager": result.amount, "wager_type": wager_type},
             )
         return result
 
@@ -1067,6 +1070,7 @@ class PostgresEconomyStore:
         user_id: int,
         payout: int,
         *,
+        wager_type: str = "unknown",
         now: Optional[int] = None,
     ) -> int:
         """Credit the payout for a wager that was deducted before interactive play."""
@@ -1085,7 +1089,10 @@ class PostgresEconomyStore:
             if row is None:
                 raise RuntimeError("Reserved wager account no longer exists")
             balance = int(row["balance"])
-        self._log("wager_payout", guild_id, user_id, payout, balance, timestamp)
+        self._log(
+            "wager_payout", guild_id, user_id, payout, balance, timestamp,
+            details={"wager_type": wager_type},
+        )
         return balance
 
     async def credit_activity_reward(

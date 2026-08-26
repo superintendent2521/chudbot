@@ -122,7 +122,7 @@ async def _send_equipment_autocomplete(ctx: AutocompleteContext) -> None:
     search = (ctx.input_text or "").strip().casefold()
     choices = []
     for equipment in EQUIPMENT_BY_KEY.values():
-        item = LOOT_BY_KEY[equipment.item_key]
+        item = LOOT_BY_KEY.get(equipment.item_key) or CRAFTED_ITEMS_BY_KEY[equipment.item_key]
         if search and search not in item.name.casefold():
             continue
         choices.append({"name": f"{item.emoji} {item.name}", "value": item.name})

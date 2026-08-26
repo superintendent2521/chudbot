@@ -28,6 +28,7 @@ from chudbot.games.spaceflight_dumpster import (
     resolve_equipment,
     roll_loot,
 )
+from chudbot.economy.crafting import CRAFTED_ITEMS_BY_KEY
 
 LOGGER = logging.getLogger("chuds.bot.web")
 MAX_MESSAGE_BYTES = 64 * 1024
@@ -178,8 +179,8 @@ class EconomyWebSocket:
                 "equipment": [
                     {
                         "key": rule.item_key,
-                        "name": LOOT_BY_KEY[rule.item_key].name,
-                        "emoji": LOOT_BY_KEY[rule.item_key].emoji,
+                        "name": self._item_descriptor(rule.item_key).name,
+                        "emoji": self._item_descriptor(rule.item_key).emoji,
                         "description": rule.description,
                         "available": quantities.get(rule.item_key, 0),
                     }
@@ -228,38 +229,69 @@ class EconomyWebSocket:
                 "equipment": equipment_rule,
                 "haul": {},
                 "round": 0,
-                "max_rounds": SALVAGE_MAX_ROUNDS + (equipment_rule.extra_rounds if equipment_rule else 0),
+                "max_rounds": 5 + (equipment_rule.extra_rounds if equipment_rule else 0),
+                "fuel": 6 + (equipment_rule.extra_fuel if equipment_rule else 0),
+                "hull": 3,
+                "combo": 0,
+                "scanned": False,
             }
             return self._salvage_state("salvage_started", balance=started.balance)
         if operation == "salvage_action":
             if self.salvage is None:
                 raise ValueError("no salvage run is active")
             action = payload.get("action")
-            if action not in {"rummage", "deep", "leave"}:
-                raise ValueError("action must be rummage, deep, or leave")
+            if action not in {"scan", "mine", "deep", "leave"}:
+                raise ValueError("action must be scan, mine, deep, or leave")
+            run = self.salvage
+            if action == "scan":
+                if run["fuel"] < 1:
+                    raise ValueError("the ship has no fuel left")
+                run["fuel"] -= 1
+                run["scanned"] = True
+                risk = hazard_chance(
+                    run["location"], deep=False,
+                    hazard_reduction=run["equipment"].hazard_reduction if run["equipment"] else 0.0,
+                ) * 100
+                return {
+                    **self._salvage_state("salvage_scan"),
+                    "scan": {"risk_percent": round(risk, 1), "rare_bonus": 0.25},
+                    "message": f"Sensors estimate {risk:.1f}% hull-risk. The next mining action gets a rare-loot bonus.",
+                }
             if action == "leave":
                 return await self._finish_salvage("salvage_left")
-            run = self.salvage
             location = run["location"]
             equipment = run["equipment"]
+            fuel_cost = 2 if action == "deep" else 1
+            if run["fuel"] < fuel_cost:
+                return await self._finish_salvage("salvage_out_of_fuel")
+            run["fuel"] -= fuel_cost
+            scanned = run["scanned"]
+            run["scanned"] = False
             if random.random() < hazard_chance(
                 location, deep=action == "deep",
                 hazard_reduction=equipment.hazard_reduction if equipment else 0.0,
-            ):
+            ) * (0.55 if scanned else 1.0):
                 kept, lost = lose_half(run["haul"], rng=random)
                 run["haul"] = kept
-                result = await self._finish_salvage("salvage_hazard")
+                run["hull"] -= 1
+                run["combo"] = 0
+                if run["hull"] <= 0:
+                    result = await self._finish_salvage("salvage_destroyed")
+                else:
+                    result = self._salvage_state("salvage_hazard_progress")
                 result["lost"] = self._items(lost)
                 result["hazard"] = True
+                result["message"] = "A micrometeorite storm damaged the ship. You lost part of the haul, but escaped." if run["hull"] > 0 else "The ship was critically damaged. The remaining haul was recovered, but the expedition is over."
                 return result
             found = roll_loot(
                 location, deep=action == "deep", rng=random,
-                rarity_bonus=equipment.rarity_bonus if equipment else 0.0,
+                rarity_bonus=(equipment.rarity_bonus if equipment else 0.0) + (0.25 if scanned else 0.0) + (run["combo"] * 0.10),
             )
             for item in found:
                 run["haul"][item.key] = run["haul"].get(item.key, 0) + 1
             run["round"] += 1
-            if run["round"] >= run["max_rounds"]:
+            run["combo"] = run["combo"] + 1 if action == "deep" else 0
+            if run["round"] >= run["max_rounds"] or run["fuel"] <= 0:
                 result = await self._finish_salvage("salvage_complete")
             else:
                 result = self._salvage_state("salvage_progress")
@@ -289,13 +321,17 @@ class EconomyWebSocket:
         raise ValueError("unknown operation")
 
     @staticmethod
+    def _item_descriptor(item_key: str) -> Any:
+        return LOOT_BY_KEY.get(item_key) or CRAFTED_ITEMS_BY_KEY[item_key]
+
+    @staticmethod
     def _items(items: Any) -> list[dict[str, Any]]:
         if isinstance(items, dict):
             pairs = items.items()
         else:
             pairs = ((item.key, 1) for item in items)
         return [
-            {"key": key, "name": LOOT_BY_KEY[key].name, "emoji": LOOT_BY_KEY[key].emoji, "quantity": quantity}
+            {"key": key, "name": EconomyWebSocket._item_descriptor(key).name, "emoji": EconomyWebSocket._item_descriptor(key).emoji, "quantity": quantity}
             for key, quantity in pairs
         ]
 
@@ -308,6 +344,10 @@ class EconomyWebSocket:
             "max_rounds": run["max_rounds"],
             "location": {"key": run["location"].key, "name": run["location"].name, "emoji": run["location"].emoji},
             "haul": self._items(run["haul"]),
+            "fuel": run["fuel"],
+            "hull": run["hull"],
+            "combo": run["combo"],
+            "scanned": run["scanned"],
         }
         if balance is not None:
             result["balance"] = balance
@@ -475,15 +515,15 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
 
 
 async def index(_: web.Request) -> web.FileResponse:
-    return web.FileResponse(os.path.join(WEB_UI_DIR, "web_index.html"))
+    return web.FileResponse(os.path.join(WEB_UI_DIR, "web_index.html"), headers={"Cache-Control": "no-store"})
 
 
 async def asset_css(_: web.Request) -> web.FileResponse:
-    return web.FileResponse(os.path.join(WEB_UI_DIR, "web_style.css"))
+    return web.FileResponse(os.path.join(WEB_UI_DIR, "web_style.css"), headers={"Cache-Control": "no-store"})
 
 
 async def asset_js(_: web.Request) -> web.FileResponse:
-    return web.FileResponse(os.path.join(WEB_UI_DIR, "web_app.js"))
+    return web.FileResponse(os.path.join(WEB_UI_DIR, "web_app.js"), headers={"Cache-Control": "no-store"})
 
 
 def create_web_app(economy_store: Any = None, *, password: str | None = None, password_hash: str | None = None, max_transfer: int = 1_000_000, backend_url: str | None = None, backend_secret: str | None = None, backend_ca_file: str | None = None) -> web.Application:

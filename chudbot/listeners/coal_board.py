@@ -13,9 +13,8 @@ from chudbot.storage.guild_channels import GuildChannelStore
 from chudbot.listeners.reaction_roles import member_has_role, snowflake_to_int
 
 
-COAL_EMOJI = "Coal"
-COAL_EMOJI_ID = 1_457_140_176_072_741_040
-COAL_THRESHOLD = 2
+COAL_EMOJI = "coal"
+COAL_THRESHOLD = 3
 
 # Track which messages we've already posted to avoid duplicates
 posted_messages: Set[int] = set()
@@ -40,12 +39,14 @@ async def _get_sendable_channel(client, channel_id: int, logger: logging.Logger)
 
 
 def _is_coal_emoji(emoji) -> bool:
-    emoji_name = getattr(emoji, "name", str(emoji))
-    emoji_id = snowflake_to_int(getattr(emoji, "id", None))
-    return (
-        emoji_name == COAL_EMOJI
-        or str(emoji) == COAL_EMOJI
-        or emoji_id == COAL_EMOJI_ID
+    return str(getattr(emoji, "name", "")).casefold() == COAL_EMOJI
+
+
+def _coal_reaction_count(reactions) -> int:
+    return sum(
+        getattr(reaction, "count", 1)
+        for reaction in reactions or ()
+        if _is_coal_emoji(getattr(reaction, "emoji", None))
     )
 
 
@@ -73,15 +74,7 @@ def create_coal_reaction_listeners(
             author = getattr(event, "author", None)
             force_post = bool(author and member_has_role(author, admin_role_id))
 
-            coal_count = 0
-            if hasattr(message, "reactions") and message.reactions:
-                for reaction in message.reactions:
-                    try:
-                        if _is_coal_emoji(reaction.emoji):
-                            coal_count = reaction.count if hasattr(reaction, "count") else 1
-                            break
-                    except Exception:
-                        continue
+            coal_count = _coal_reaction_count(getattr(message, "reactions", None))
 
             if coal_count < COAL_THRESHOLD and not force_post:
                 return

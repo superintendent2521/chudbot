@@ -18,6 +18,8 @@ from chudbot.economy.store import DEFAULT_POSTGRES_URL, PostgresEconomyStore
 from chudbot.websocketserver.websocket_api import (
     ECONOMY_STORE_KEY,
     WEB_MAX_TRANSFER_KEY,
+    WEB_PASSWORD_HASH_KEY,
+    WEB_PASSWORD_KEY,
     EconomyWebSocket,
 )
 
@@ -127,6 +129,8 @@ def create_backend_app(store: PostgresEconomyStore, secret: str) -> web.Applicat
         raise ValueError("WEB_BACKEND_SECRET is required")
     app = web.Application()
     app[ECONOMY_STORE_KEY] = store
+    app[WEB_PASSWORD_KEY] = ""
+    app[WEB_PASSWORD_HASH_KEY] = ""
     app[WEB_MAX_TRANSFER_KEY] = 1_000_000
     app[BACKEND_SECRET_KEY] = secret
     app.router.add_get("/health", health)
