@@ -311,8 +311,6 @@ def setup(handler: CommandHandler) -> None:
             f"Current tracks: {current_tracks:,}",
             f"Queued tracks: {queued_tracks:,}",
             f"Paused players: {paused_players:,}",
-            f"Volumes: {', '.join(str(volume) for volume in volumes) if volumes else 'None'}",
-            f"Now playing: {', '.join(track_titles) if track_titles else 'Nothing'}",
             f"Ping: {_format_ping(bot)}",
         ]
         lines.extend(economy_lines)
