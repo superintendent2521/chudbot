@@ -688,7 +688,7 @@ class PostgresEconomyStore:
                 """INSERT INTO ai_user_memories (user_id, memory, updated_at)
                    VALUES (%s, %s, %s)
                    ON CONFLICT (user_id) DO UPDATE
-                   SET memory = LEFT(ai_user_memories.memory || E'\\n' || EXCLUDED.memory, 10000),
+                   SET memory = RIGHT(ai_user_memories.memory || E'\\n' || EXCLUDED.memory, 10000),
                        updated_at = EXCLUDED.updated_at
                    RETURNING memory""",
                 (user_id, note, timestamp),

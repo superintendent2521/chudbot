@@ -26,8 +26,11 @@ def setup(handler: CommandHandler) -> None:
     def _controller_can_serve(guild_id: int, channel_id: Optional[int]) -> bool:
         session = music_manager.active_session(guild_id)
         if not session:
-            return True
+            assigned_channel_id = music_pool.channel_for_guild(guild_id)
+            return assigned_channel_id is None or (channel_id is not None and assigned_channel_id != channel_id)
         current_channel_id = getattr(session, "_channel_id", None)
+        if channel_id is None:
+            return music_pool.channel_for_guild(guild_id) is None
         return current_channel_id is None or current_channel_id == channel_id
 
     async def _try_worker(

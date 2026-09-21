@@ -20,7 +20,6 @@ from chudbot.listeners.gem_board import create_gem_reaction_listeners
 from chudbot.listeners.coal_board import create_coal_reaction_listeners
 from chudbot.listeners.fixupx import create_fixupx_listener
 from chudbot.listeners.message_delete import create_message_delete_logging_listeners
-from chudbot.listeners.ai import create_ai_listener
 from chudbot.economy.message_rewards import create_economy_message_reward_listener
 
 load_dotenv()
@@ -170,9 +169,6 @@ for listener in create_message_delete_logging_listeners(audit_log_store, logger)
     bot.add_listener(listener)
 for listener in create_economy_message_reward_listener(economy_store, logger):
     bot.add_listener(listener)
-for listener in create_ai_listener(economy_store, logger):
-    bot.add_listener(listener)
-
 def main() -> None:
     """Start the configured Discord client."""
     logger.info("Environment: %s", ENVIRONMENT)

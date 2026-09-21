@@ -61,12 +61,19 @@ TOOLS = [
 
 def _calculate(expression: str) -> str:
     """Evaluate only numeric arithmetic; never execute arbitrary Python."""
+    if len(expression) > 200:
+        raise ValueError("expression is too long")
     allowed = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant, ast.Add, ast.Sub,
                ast.Mult, ast.Div, ast.Pow, ast.Mod, ast.USub, ast.UAdd, ast.FloorDiv)
     tree = ast.parse(expression, mode="eval")
-    if any(not isinstance(node, allowed) or (isinstance(node, ast.Constant) and not isinstance(node.value, (int, float)))
-           for node in ast.walk(tree)):
-        raise ValueError("only arithmetic is allowed")
+    for node in ast.walk(tree):
+        if not isinstance(node, allowed):
+            raise ValueError("only arithmetic is allowed")
+        if isinstance(node, ast.Constant) and (isinstance(node.value, bool) or not isinstance(node.value, (int, float))):
+            raise ValueError("only arithmetic is allowed")
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow) and isinstance(node.right, ast.Constant):
+            if abs(node.right.value) > 100:
+                raise ValueError("exponent is too large")
     value = eval(compile(tree, "<calculator>", "eval"), {"__builtins__": {}}, {})
     if not isinstance(value, (int, float)) or abs(value) > 1e100:
         raise ValueError("result is out of range")
@@ -151,7 +158,7 @@ def create_ai_listener(store: Any, logger: logging.Logger):
                             except Exception as error:
                                 result = f"Tool error: {error}"
                             provider_messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
-                except (aiohttp.ClientError, KeyError, TypeError, ValueError) as error:
+                except (aiohttp.ClientError, asyncio.TimeoutError, KeyError, TypeError, ValueError) as error:
                     logger.warning("%s AI provider failed; trying next provider: %s", provider_name, error)
         return "I couldn't finish that request."
 
