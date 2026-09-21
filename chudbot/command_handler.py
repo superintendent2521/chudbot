@@ -38,6 +38,7 @@ class CommandResources:
     coal_board_store: "GuildChannelStore" # type: ignore
     audit_log_store: "GuildChannelStore" # type: ignore
     economy_store: "PostgresEconomyStore" # type: ignore
+    music_pool: "MusicWorkerPool" # type: ignore
 
 
 class CommandHandler:

@@ -8,6 +8,7 @@ from chudbot.command_handler import CommandHandler, CommandResources
 from chudbot.storage.guild_channels import GuildChannelStore
 from chudbot.economy.store import DEFAULT_POSTGRES_URL, PostgresEconomyStore
 from chudbot.music.runtime import MusicError, MusicRuntime
+from chudbot.music.pool import MusicWorkerPool
 from chudbot.listeners.reaction_roles import (
     ReactionRoleStore,
     create_reaction_role_listeners,
@@ -15,11 +16,11 @@ from chudbot.listeners.reaction_roles import (
     snowflake_to_int,
 )
 from chudbot.listeners.voice_logging import VoiceLogStore, create_voice_logging_listeners
-from chudbot.listeners.member_join import create_member_join_listeners
 from chudbot.listeners.gem_board import create_gem_reaction_listeners
 from chudbot.listeners.coal_board import create_coal_reaction_listeners
 from chudbot.listeners.fixupx import create_fixupx_listener
 from chudbot.listeners.message_delete import create_message_delete_logging_listeners
+from chudbot.listeners.ai import create_ai_listener
 from chudbot.economy.message_rewards import create_economy_message_reward_listener
 
 load_dotenv()
@@ -114,6 +115,7 @@ music_runtime = MusicRuntime(
     audio_normalization=AUDIO_NORMALIZATION,
     normalization_max_amplitude=NORMALIZATION_MAX_AMPLITUDE,
 )
+music_pool = MusicWorkerPool.from_environment(logger)
 bot = Client(
     token=BOT_TOKEN,
     intents=Intents.DEFAULT
@@ -147,6 +149,7 @@ command_resources = CommandResources(
     coal_board_store=coal_board_store,
     audit_log_store=audit_log_store,
     economy_store=economy_store,
+    music_pool=music_pool,
 )
 command_handler = CommandHandler(bot, command_resources)
 command_handler.load_from_package("chudbot.commands")
@@ -157,8 +160,6 @@ for listener in music_runtime.create_gateway_listeners():
     bot.add_listener(listener)
 for listener in create_voice_logging_listeners(voice_log_store, logger):
     bot.add_listener(listener)
-for listener in create_member_join_listeners(logger):
-    bot.add_listener(listener)
 for listener in create_gem_reaction_listeners(gem_board_store, logger):
     bot.add_listener(listener)
 for listener in create_coal_reaction_listeners(coal_board_store, REACTION_ROLE_ADMIN_ROLE_ID, logger):
@@ -168,6 +169,8 @@ for listener in create_fixupx_listener(logger):
 for listener in create_message_delete_logging_listeners(audit_log_store, logger):
     bot.add_listener(listener)
 for listener in create_economy_message_reward_listener(economy_store, logger):
+    bot.add_listener(listener)
+for listener in create_ai_listener(economy_store, logger):
     bot.add_listener(listener)
 
 def main() -> None:
