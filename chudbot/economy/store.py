@@ -405,6 +405,15 @@ class PostgresEconomyStore:
                 """
             )
             await connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ai_user_memories (
+                    user_id BIGINT PRIMARY KEY,
+                    memory TEXT NOT NULL DEFAULT '',
+                    updated_at BIGINT NOT NULL
+                )
+                """
+            )
+            await connection.execute(
                 """ALTER TABLE economy_accounts
                    ADD COLUMN IF NOT EXISTS security_level INTEGER NOT NULL DEFAULT 0
                    CHECK (security_level BETWEEN 0 AND 20)"""
@@ -656,6 +665,35 @@ class PostgresEconomyStore:
                 VALUES {placeholders} ON CONFLICT DO NOTHING""",
             tuple(parameters),
         )
+
+    async def get_ai_memory(self, user_id: int) -> str:
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            row = await self._fetchone(
+                connection,
+                "SELECT memory FROM ai_user_memories WHERE user_id = %s",
+                (user_id,),
+            )
+        return str(row["memory"]) if row else ""
+
+    async def append_ai_memory(self, user_id: int, note: str) -> str:
+        note = note.strip()
+        if not note:
+            return await self.get_ai_memory(user_id)
+        timestamp = int(time.time())
+        connection_context = await self._connection()
+        async with connection_context as connection:
+            row = await self._fetchone(
+                connection,
+                """INSERT INTO ai_user_memories (user_id, memory, updated_at)
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT (user_id) DO UPDATE
+                   SET memory = LEFT(ai_user_memories.memory || E'\\n' || EXCLUDED.memory, 10000),
+                       updated_at = EXCLUDED.updated_at
+                   RETURNING memory""",
+                (user_id, note, timestamp),
+            )
+        return str(row["memory"])
 
     async def balance(self, guild_id: int, user_id: int, *, now: Optional[int] = None) -> int:
         timestamp = self._now(now)

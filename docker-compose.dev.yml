@@ -33,6 +33,25 @@ services:
         condition: service_healthy
     command: ["python", "index.py"]
 
+  music-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    env_file:
+      - .env
+    environment:
+      CHUDBOT_ENVIRONMENT: dev
+      LAVALINK_HOST: lavalink
+      LAVALINK_PORT: "2333"
+      LAVALINK_SSL: "false"
+      MUSIC_WORKER_PORT: 8787
+      MUSIC_WORKER_HOST: 0.0.0.0
+    volumes:
+      - .:/app
+    depends_on:
+      - bot
+    command: ["python", "-m", "chudbot.music_worker"]
+
   web:
     build:
       context: .

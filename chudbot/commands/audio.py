@@ -21,6 +21,45 @@ def setup(handler: CommandHandler) -> None:
     get_lavalink_client = resources.get_lavalink_client
     logger = resources.logger
     MusicError = resources.music_error_cls
+    music_pool = resources.music_pool
+
+    def _controller_can_serve(guild_id: int, channel_id: Optional[int]) -> bool:
+        session = music_manager.active_session(guild_id)
+        if not session:
+            return True
+        current_channel_id = getattr(session, "_channel_id", None)
+        return current_channel_id is None or current_channel_id == channel_id
+
+    async def _try_worker(
+        ctx: SlashContext,
+        action: str,
+        query: Optional[str] = None,
+        *,
+        force: bool = False,
+    ) -> bool:
+        if not music_pool.enabled or not ctx.guild_id:
+            return False
+        channel = get_voice_channel(ctx.author)
+        channel_id = getattr(channel, "id", None) if channel else None
+        if not force and _controller_can_serve(int(ctx.guild_id), channel_id):
+            return False
+        if action == "stop" and channel_id is None:
+            channel_id = music_pool.channel_for_guild(int(ctx.guild_id))
+        if action == "play":
+            await ctx.defer()
+        result = await music_pool.execute(
+            action=action,
+            guild_id=int(ctx.guild_id),
+            channel_id=int(channel_id) if channel_id is not None else None,
+            user_id=int(ctx.author.id),
+            query=query,
+        )
+        if not result.get("handled"):
+            return False
+        if action == "stop" and result.get("ok"):
+            music_pool.release(int(ctx.guild_id), channel_id)
+        await ctx.send(result.get("message", "Music worker completed the request."), ephemeral=not result.get("ok", False))
+        return True
 
     def _track_thumbnail(track: lavalink.AudioTrack) -> Optional[str]:
         uri = getattr(track, "uri", "") or ""
@@ -80,6 +119,14 @@ def setup(handler: CommandHandler) -> None:
     )
     async def play_command(ctx: SlashContext, query: str):
         if not await require_music_permission(ctx):
+            return
+        voice_channel = get_voice_channel(ctx.author)
+        if await _try_worker(
+            ctx,
+            "play",
+            query,
+            force=bool(voice_channel and not _controller_can_serve(int(ctx.guild_id or 0), int(voice_channel.id))),
+        ):
             return
         if not await require_lavalink(ctx):
             return
@@ -176,6 +223,8 @@ def setup(handler: CommandHandler) -> None:
     async def skip_command(ctx: SlashContext):
         if not await require_music_permission(ctx):
             return
+        if await _try_worker(ctx, "skip", force=not _controller_can_serve(int(ctx.guild_id or 0), getattr(get_voice_channel(ctx.author), "id", None))):
+            return
         if not await require_lavalink(ctx):
             return
         if not ctx.guild_id:
@@ -192,6 +241,8 @@ def setup(handler: CommandHandler) -> None:
     @slash_command(name="pause", description="Pause the current track")
     async def pause_command(ctx: SlashContext):
         if not await require_music_permission(ctx):
+            return
+        if await _try_worker(ctx, "pause", force=not _controller_can_serve(int(ctx.guild_id or 0), getattr(get_voice_channel(ctx.author), "id", None))):
             return
         if not await require_lavalink(ctx):
             return
@@ -211,6 +262,8 @@ def setup(handler: CommandHandler) -> None:
     async def resume_command(ctx: SlashContext):
         if not await require_music_permission(ctx):
             return
+        if await _try_worker(ctx, "resume", force=not _controller_can_serve(int(ctx.guild_id or 0), getattr(get_voice_channel(ctx.author), "id", None))):
+            return
         if not await require_lavalink(ctx):
             return
         if not ctx.guild_id:
@@ -226,6 +279,8 @@ def setup(handler: CommandHandler) -> None:
 
     @slash_command(name="nowplaying", description="Show details about the current song")
     async def now_playing_command(ctx: SlashContext):
+        if await _try_worker(ctx, "nowplaying", force=not _controller_can_serve(int(ctx.guild_id or 0), getattr(get_voice_channel(ctx.author), "id", None))):
+            return
         if not await require_lavalink(ctx):
             return
         if not ctx.guild_id:
@@ -269,6 +324,8 @@ def setup(handler: CommandHandler) -> None:
 
     @slash_command(name="queue", description="Show the current music queue")
     async def queue_command(ctx: SlashContext):
+        if await _try_worker(ctx, "queue", force=not _controller_can_serve(int(ctx.guild_id or 0), getattr(get_voice_channel(ctx.author), "id", None))):
+            return
         if not await require_lavalink(ctx):
             return
         if not ctx.guild_id:
@@ -306,6 +363,8 @@ def setup(handler: CommandHandler) -> None:
     async def stop_command(ctx: SlashContext):
         if not await require_music_permission(ctx):
             return
+        if await _try_worker(ctx, "stop", force=not _controller_can_serve(int(ctx.guild_id or 0), getattr(get_voice_channel(ctx.author), "id", None))):
+            return
         if not await require_lavalink(ctx):
             return
         if not ctx.guild_id:
@@ -340,4 +399,3 @@ def setup(handler: CommandHandler) -> None:
     handler.register_slash_command(now_playing_command)
     handler.register_slash_command(queue_command)
     handler.register_slash_command(stop_command)
-

@@ -58,6 +58,22 @@ Application code lives in the `chudbot` package and is grouped by feature:
 - `music` — Lavalink playback and session management
 - `storage` — small JSON-backed stores
 
+### Multiple music channels
+
+Discord permits one bot account to occupy one voice channel per server. For
+concurrent playback, keep Chudbot as the controller and run one dedicated music
+worker bot per simultaneous voice channel. Configure the controller with:
+
+```env
+MUSIC_WORKER_URLS=http://music-worker:8787,http://music-worker-2:8787
+MUSIC_WORKER_SECRET=use-a-long-random-value
+```
+
+Each worker needs its own Discord bot token as `MUSIC_WORKER_TOKEN` and the same
+Lavalink settings. Invite workers with View Channel, Connect, and Speak
+permissions. Workers do not register slash commands. If `MUSIC_WORKER_URLS` is
+absent, the original single-bot playback path remains active.
+
 Runtime JSON data lives in `data`. See [docs/structure.md](docs/structure.md) for
 the full repository map.
 

@@ -230,9 +230,39 @@ def _get_playing_music_channel_count(lavalink_client: Any) -> int:
     return len(channel_ids) + fallback_count
 
 
+def _get_audio_stats(lavalink_client: Any) -> tuple[int, int, int, list[str], list[int]]:
+    if lavalink_client is None:
+        return 0, 0, 0, [], []
+    player_manager = getattr(lavalink_client, "player_manager", None)
+    players = []
+    for attr_name in ("players", "_players"):
+        players = _iter_values(getattr(player_manager, attr_name, None))
+        if players:
+            break
+    if not players:
+        players = _iter_values(player_manager)
+
+    current_tracks: list[str] = []
+    queued_tracks = 0
+    paused_players = 0
+    volumes: list[int] = []
+    for player in players:
+        current = getattr(player, "current", None)
+        if current is not None:
+            current_tracks.append(str(getattr(current, "title", "Unknown track")))
+        queued_tracks += len(getattr(player, "queue", []) or [])
+        if getattr(player, "paused", False):
+            paused_players += 1
+        volume = getattr(player, "volume", None)
+        if isinstance(volume, (int, float)):
+            volumes.append(int(volume))
+    return len(current_tracks), queued_tracks, paused_players, current_tracks[:5], volumes
+
+
 def setup(handler: CommandHandler) -> None:
     bot = handler.bot
     get_lavalink_client = handler.resources.get_lavalink_client
+    music_pool = handler.resources.music_pool
     economy_store = handler.resources.economy_store
     logger = handler.resources.logger
 
@@ -242,7 +272,10 @@ def setup(handler: CommandHandler) -> None:
         guilds = _get_guilds(bot)
         total_users = sum(_get_member_count(guild) for guild in guilds)
         total_channels = _get_total_channels(bot, guilds)
-        playing_music_channels = _get_playing_music_channel_count(get_lavalink_client())
+        controller_music_channels = _get_playing_music_channel_count(get_lavalink_client())
+        current_tracks, queued_tracks, paused_players, track_titles, volumes = _get_audio_stats(get_lavalink_client())
+        worker_music_channels = len(music_pool.assignments) if music_pool.enabled else 0
+        playing_music_channels = controller_music_channels + worker_music_channels
 
         try:
             economy = await economy_store.statistics()
@@ -269,7 +302,17 @@ def setup(handler: CommandHandler) -> None:
             f"Users across servers: {total_users:,}",
             f"Channels: {total_channels:,}",
             f"RAM usage: {_format_bytes(_current_rss_bytes())}",
-            f"Playing music in {playing_music_channels:,} channels",
+            "",
+            "**Music Statistics**",
+            f"Controller channels: {controller_music_channels:,}",
+            f"Worker channels: {worker_music_channels:,}",
+            f"Total playing channels: {playing_music_channels:,}",
+            f"Worker slots: {worker_music_channels:,}/{len(music_pool.urls):,}",
+            f"Current tracks: {current_tracks:,}",
+            f"Queued tracks: {queued_tracks:,}",
+            f"Paused players: {paused_players:,}",
+            f"Volumes: {', '.join(str(volume) for volume in volumes) if volumes else 'None'}",
+            f"Now playing: {', '.join(track_titles) if track_titles else 'Nothing'}",
             f"Ping: {_format_ping(bot)}",
         ]
         lines.extend(economy_lines)
