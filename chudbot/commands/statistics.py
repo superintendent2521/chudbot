@@ -188,6 +188,10 @@ def _format_ping(bot: Any) -> str:
     return "Unknown"
 
 
+def _build_commit() -> str:
+    return os.getenv("CHUDBOT_GIT_COMMIT", "unknown").strip() or "unknown"
+
+
 def _player_is_playing(player: Any) -> bool:
     if getattr(player, "paused", False):
         return False
@@ -301,6 +305,7 @@ def setup(handler: CommandHandler) -> None:
             f"Servers: {len(guilds):,}",
             f"Users across servers: {total_users:,}",
             f"Channels: {total_channels:,}",
+            f"Git commit: {_build_commit()}",
             f"RAM usage: {_format_bytes(_current_rss_bytes())}",
             "",
             "**Music Statistics**",
