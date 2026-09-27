@@ -20,6 +20,11 @@ GEM_CURATOR_ROLE_ID = 1_434_633_532_436_648_126
 posted_messages: Set[int] = set()
 
 
+def _is_gem_board_message(message, gem_channel_id: int) -> bool:
+    channel = getattr(message, "channel", None)
+    return snowflake_to_int(getattr(channel, "id", channel)) == snowflake_to_int(gem_channel_id)
+
+
 async def _get_sendable_channel(client, channel_id: int, logger: logging.Logger):
     channel = client.cache.get_channel(channel_id)
     if not channel:
@@ -160,6 +165,9 @@ def create_gem_reaction_listeners(store: GuildChannelStore, logger: logging.Logg
 
             gem_channel_id = store.get_channel_id(guild_id)
             if not gem_channel_id:
+                return
+            if _is_gem_board_message(message, gem_channel_id):
+                logger.debug("Skipping gem board repost for message %s already in gem channel", message.id)
                 return
 
             # Get author info
