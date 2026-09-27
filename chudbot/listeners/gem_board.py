@@ -9,6 +9,7 @@ from interactions import Member, listen
 from interactions.api.events.discord import MessageReactionAdd
 from interactions.models import Embed
 from chudbot.storage.guild_channels import GuildChannelStore
+from chudbot.storage.gem_ignored_channels import GemIgnoredChannelStore
 from chudbot.listeners.reaction_roles import member_has_role, snowflake_to_int
 
 
@@ -23,6 +24,16 @@ posted_messages: Set[int] = set()
 def _is_gem_board_message(message, gem_channel_id: int) -> bool:
     channel = getattr(message, "channel", None)
     return snowflake_to_int(getattr(channel, "id", channel)) == snowflake_to_int(gem_channel_id)
+
+
+def _is_ignored_gem_message(message, ignored_channel_ids: set[int]) -> bool:
+    channel = getattr(message, "channel", None)
+    channel_id = snowflake_to_int(getattr(channel, "id", channel))
+    parent_id = snowflake_to_int(getattr(channel, "parent_id", None))
+    parent = getattr(channel, "parent", None)
+    if parent_id is None and parent is not None:
+        parent_id = snowflake_to_int(getattr(parent, "id", parent))
+    return channel_id in ignored_channel_ids or parent_id in ignored_channel_ids
 
 
 async def _get_sendable_channel(client, channel_id: int, logger: logging.Logger):
@@ -81,7 +92,9 @@ async def _get_member_from_reaction_event(
         return None
 
 
-def create_gem_reaction_listeners(store: GuildChannelStore, logger: logging.Logger) -> Tuple:
+def create_gem_reaction_listeners(
+    store: GuildChannelStore, ignored_store: GemIgnoredChannelStore, logger: logging.Logger
+) -> Tuple:
     """Create listeners for gem reactions using per-guild channel config."""
 
     @listen(MessageReactionAdd)
@@ -165,6 +178,9 @@ def create_gem_reaction_listeners(store: GuildChannelStore, logger: logging.Logg
 
             gem_channel_id = store.get_channel_id(guild_id)
             if not gem_channel_id:
+                return
+            if _is_ignored_gem_message(message, ignored_store.get(guild_id)):
+                logger.debug("Skipping gem board post for ignored channel message %s", message.id)
                 return
             if _is_gem_board_message(message, gem_channel_id):
                 logger.debug("Skipping gem board repost for message %s already in gem channel", message.id)

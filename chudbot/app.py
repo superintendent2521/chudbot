@@ -6,6 +6,7 @@ from interactions import Client, Intents
 
 from chudbot.command_handler import CommandHandler, CommandResources
 from chudbot.storage.guild_channels import GuildChannelStore
+from chudbot.storage.gem_ignored_channels import GemIgnoredChannelStore
 from chudbot.economy.store import DEFAULT_POSTGRES_URL, PostgresEconomyStore
 from chudbot.music.runtime import MusicError, MusicRuntime
 from chudbot.music.pool import MusicWorkerPool
@@ -44,6 +45,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 REACTION_ROLE_DATA_FILE = os.path.join(DATA_DIR, "reaction_roles.json")
 VOICE_LOG_DATA_FILE = os.path.join(DATA_DIR, "voice_log_channels.json")
 GEM_BOARD_DATA_FILE = os.path.join(DATA_DIR, "gem_board_channels.json")
+GEM_IGNORED_CHANNELS_DATA_FILE = os.path.join(DATA_DIR, "gem_ignored_channels.json")
 COAL_BOARD_DATA_FILE = os.path.join(DATA_DIR, "coal_board_channels.json")
 AUDIT_LOG_DATA_FILE = os.path.join(DATA_DIR, "audit_log_channels.json")
 
@@ -87,6 +89,7 @@ voice_log_store = VoiceLogStore(
     logger,
 )
 gem_board_store = GuildChannelStore(GEM_BOARD_DATA_FILE, logger)
+gem_ignored_channel_store = GemIgnoredChannelStore(GEM_IGNORED_CHANNELS_DATA_FILE, logger)
 coal_board_store = GuildChannelStore(COAL_BOARD_DATA_FILE, logger)
 audit_log_store = GuildChannelStore(AUDIT_LOG_DATA_FILE, logger)
 economy_store = PostgresEconomyStore(
@@ -145,6 +148,7 @@ command_resources = CommandResources(
     music_error_cls=MusicError,
     voice_log_store=voice_log_store,
     gem_board_store=gem_board_store,
+    gem_ignored_channel_store=gem_ignored_channel_store,
     coal_board_store=coal_board_store,
     audit_log_store=audit_log_store,
     economy_store=economy_store,
@@ -159,7 +163,7 @@ for listener in music_runtime.create_gateway_listeners():
     bot.add_listener(listener)
 for listener in create_voice_logging_listeners(voice_log_store, logger):
     bot.add_listener(listener)
-for listener in create_gem_reaction_listeners(gem_board_store, logger):
+for listener in create_gem_reaction_listeners(gem_board_store, gem_ignored_channel_store, logger):
     bot.add_listener(listener)
 for listener in create_coal_reaction_listeners(coal_board_store, REACTION_ROLE_ADMIN_ROLE_ID, logger):
     bot.add_listener(listener)

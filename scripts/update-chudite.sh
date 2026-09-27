@@ -13,6 +13,7 @@ readonly -a RUNTIME_FILES=(
   audit_log_channels.json
   coal_board_channels.json
   gem_board_channels.json
+  gem_ignored_channels.json
   reaction_roles.json
   voice_log_channels.json
   warns.json
