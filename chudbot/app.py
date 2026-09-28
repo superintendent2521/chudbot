@@ -16,7 +16,11 @@ from chudbot.listeners.reaction_roles import (
     member_has_role,
     snowflake_to_int,
 )
-from chudbot.listeners.voice_logging import VoiceLogStore, create_voice_logging_listeners
+from chudbot.listeners.voice_logging import (
+    VoiceLogStore,
+    create_music_leave_logger,
+    create_voice_logging_listeners,
+)
 from chudbot.listeners.gem_board import create_gem_reaction_listeners
 from chudbot.listeners.coal_board import create_coal_reaction_listeners
 from chudbot.listeners.fixupx import create_fixupx_listener
@@ -44,6 +48,7 @@ DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 REACTION_ROLE_DATA_FILE = os.path.join(DATA_DIR, "reaction_roles.json")
 VOICE_LOG_DATA_FILE = os.path.join(DATA_DIR, "voice_log_channels.json")
+VOICE_LOG_IGNORED_DATA_FILE = os.path.join(DATA_DIR, "voice_log_ignored_channels.json")
 GEM_BOARD_DATA_FILE = os.path.join(DATA_DIR, "gem_board_channels.json")
 GEM_IGNORED_CHANNELS_DATA_FILE = os.path.join(DATA_DIR, "gem_ignored_channels.json")
 COAL_BOARD_DATA_FILE = os.path.join(DATA_DIR, "coal_board_channels.json")
@@ -87,6 +92,7 @@ reaction_role_store = ReactionRoleStore(
 voice_log_store = VoiceLogStore(
     VOICE_LOG_DATA_FILE,
     logger,
+    VOICE_LOG_IGNORED_DATA_FILE,
 )
 gem_board_store = GuildChannelStore(GEM_BOARD_DATA_FILE, logger)
 gem_ignored_channel_store = GemIgnoredChannelStore(GEM_IGNORED_CHANNELS_DATA_FILE, logger)
@@ -116,6 +122,7 @@ music_runtime = MusicRuntime(
     default_player_volume=DEFAULT_PLAYER_VOLUME,
     audio_normalization=AUDIO_NORMALIZATION,
     normalization_max_amplitude=NORMALIZATION_MAX_AMPLITUDE,
+    voice_leave_logger=create_music_leave_logger(voice_log_store, logger),
 )
 music_pool = MusicWorkerPool.from_environment(logger)
 bot = Client(

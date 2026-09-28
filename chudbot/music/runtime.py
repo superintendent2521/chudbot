@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 import lavalink
 from interactions import Client, Member, SlashContext, User, listen
@@ -35,6 +35,7 @@ class MusicRuntime:
         default_player_volume: int,
         audio_normalization: bool,
         normalization_max_amplitude: float,
+        voice_leave_logger: Optional[Callable[[Client, int, int], Awaitable[None]]] = None,
     ) -> None:
         self.logger = logger
         self.lavalink_host = lavalink_host
@@ -49,6 +50,7 @@ class MusicRuntime:
         self.default_player_volume = default_player_volume
         self.audio_normalization = audio_normalization
         self.normalization_max_amplitude = normalization_max_amplitude
+        self.voice_leave_logger = voice_leave_logger
         self._normalization_unavailable = False
         self.lavalink_client: Optional[lavalink.Client] = None
         self._lavalink_user_id: Optional[int] = None

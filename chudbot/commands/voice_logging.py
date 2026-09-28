@@ -35,10 +35,32 @@ def setup(handler: CommandHandler) -> None:
         required=False,
         opt_type=OptionType.CHANNEL,
     )
+    @slash_option(
+        name="voice_channel",
+        description="Voice channel to enable or disable logging for.",
+        required=False,
+        opt_type=OptionType.CHANNEL,
+    )
+    @slash_option(
+        name="enabled",
+        description="Whether voice logs should be enabled for voice_channel.",
+        required=False,
+        opt_type=OptionType.BOOLEAN,
+    )
     @slash_default_member_permission(Permissions.MANAGE_GUILD)
-    async def set_voice_log_channel(ctx: SlashContext, channel=None):
+    async def set_voice_log_channel(ctx: SlashContext, channel=None, voice_channel=None, enabled=None):
         if not ctx.guild_id:
             await ctx.send("Use this command inside a server.", ephemeral=True)
+            return
+
+        if voice_channel is not None:
+            voice_channel_id = _snowflake_to_int(voice_channel)
+            if voice_channel_id is None:
+                await ctx.send("I couldn't determine that voice channel.", ephemeral=True)
+                return
+            store.set_channel_logging(int(ctx.guild_id), voice_channel_id, enabled is not False)
+            state = "enabled" if enabled is not False else "disabled"
+            await ctx.send(f"Voice logs {state} for <#{voice_channel_id}>.", ephemeral=True)
             return
 
         target_channel = channel or ctx.channel

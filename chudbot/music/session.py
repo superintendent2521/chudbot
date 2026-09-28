@@ -60,6 +60,16 @@ class GuildMusicSession:
 
     async def disconnect(self) -> None:
         self.cancel_idle_timer()
+        departed_channel_id = self._channel_id
+        if departed_channel_id is not None and self._client and self.runtime.voice_leave_logger:
+            try:
+                await self.runtime.voice_leave_logger(self._client, self.guild_id, departed_channel_id)
+            except Exception as error:
+                self.runtime.logger.warning(
+                    "Failed to log music bot leaving guild %s: %s",
+                    self.guild_id,
+                    error,
+                )
         if self._client and self._channel_id is not None:
             try:
                 await self.runtime.issue_voice_state_update(self._client, self.guild_id, None, deafened=False)

@@ -14,12 +14,20 @@ from interactions.api.events import WebsocketReady
 
 from chudbot.music.runtime import MusicRuntime
 from chudbot.music.worker_service import MusicWorkerService
+from chudbot.listeners.voice_logging import VoiceLogStore, create_music_leave_logger
 
 
 logger = logging.getLogger("chuds.music-worker")
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DATA_DIR = os.path.join(_PROJECT_ROOT, "data")
 
 
 def _runtime() -> MusicRuntime:
+    voice_log_store = VoiceLogStore(
+        os.path.join(_DATA_DIR, "voice_log_channels.json"),
+        logger,
+        os.path.join(_DATA_DIR, "voice_log_ignored_channels.json"),
+    )
     return MusicRuntime(
         logger=logger,
         lavalink_host=os.environ["LAVALINK_HOST"],
@@ -34,6 +42,7 @@ def _runtime() -> MusicRuntime:
         default_player_volume=int(os.getenv("DEFAULT_PLAYER_VOLUME", "50")),
         audio_normalization=os.getenv("AUDIO_NORMALIZATION", "true").lower() in {"1", "true", "yes"},
         normalization_max_amplitude=float(os.getenv("NORMALIZATION_MAX_AMPLITUDE", "0.75")),
+        voice_leave_logger=create_music_leave_logger(voice_log_store, logger),
     )
 
 
