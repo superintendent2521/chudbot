@@ -16,6 +16,7 @@ readonly -a RUNTIME_FILES=(
   gem_ignored_channels.json
   reaction_roles.json
   voice_log_channels.json
+  voice_log_ignored_channels.json
   warns.json
 )
 

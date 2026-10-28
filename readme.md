@@ -77,6 +77,14 @@ absent, the original single-bot playback path remains active.
 Runtime JSON data lives in `data`. See [docs/structure.md](docs/structure.md) for
 the full repository map.
 
+### Voice logging
+
+Use `/voicelog channel:#logs` to choose where voice join and leave events are
+posted. To hide a voice channel from those logs, run
+`/voicelog voice_channel:#mod-voice enabled:false`. Run the command again with
+`enabled:true` to include that channel. Ignored channels are saved per server
+in `data/voice_log_ignored_channels.json`.
+
 The service policies are available at [docs/terms-of-service.md](docs/terms-of-service.md)
 and [docs/privacy-policy.md](docs/privacy-policy.md). Replace the bracketed
 operator, contact, jurisdiction, and retention placeholders before publishing.
